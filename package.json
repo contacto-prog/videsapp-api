@@ -1,14 +1,16 @@
 {
   "name": "videsapp-api",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "API backend para MiPharmAPP",
   "type": "module",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js",
+    "postinstall": "npx playwright install --with-deps chromium"
+  },
   "dependencies": {
     "cors": "latest",
     "express": "latest",
-    "got": "14.4.2",
-    "cheerio": "1.0.0-rc.12"
+    "playwright": "1.48.2"
   }
 }
