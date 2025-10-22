@@ -1,99 +1,124 @@
 import express from "express";
 import cors from "cors";
-import got from "got";
-import * as cheerio from "cheerio";
+import { chromium } from "playwright";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const UA = "MiPharmAPP/1.0 (+https://www.videsapp.com; contacto@videsapp.com)";
+// ---- utilidades ----
+const WAIT = 8000; // ms para esperar que cargue JS
+const UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari";
+
+// Normaliza texto
+const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
 const asNumber = (txt) => {
   if (!txt) return null;
   const n = Number(txt.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.]/g, ""));
   return Number.isFinite(n) ? n : null;
 };
-const normName = (s) => String(s || "").replace(/\s+/g, " ").trim();
 
-async function fetchHTML(url) {
-  return got(url, {
-    timeout: { request: 10000 },
-    headers: { "user-agent": UA, accept: "text/html, */*" },
-    https: { rejectUnauthorized: true },
-  }).text();
+// Extrae items en la página según varios selectores candidatos
+async function extractProducts(page, candidates) {
+  for (const sel of candidates) {
+    const cards = await page.$$(sel);
+    if (cards.length) {
+      const out = [];
+      for (const el of cards) {
+        const title = norm(await el.textContent().catch(() => "")) || null;
+
+        // Intentar encontrar un precio cercano dentro de la misma tarjeta
+        const priceNode = await el.$(":text-matches('/\\$|\\d/', 'i')");
+        let priceText = null;
+        if (priceNode) priceText = await priceNode.textContent().catch(() => null);
+
+        out.push({
+          title,
+          price: asNumber(priceText),
+        });
+      }
+      // filtra sine título
+      return out.filter(i => i.title);
+    }
+  }
+  return [];
 }
 
-// CRUZ VERDE
-async function searchCruzVerde(query) {
-  const url = "https://www.cruzverde.cl/search?q=" + encodeURIComponent(query.trim());
-  const html = await fetchHTML(url);
-  const $ = cheerio.load(html);
-  const items = [];
-  $(".product-tile, li.product, div.grid-tile").each((_, el) => {
-    const title =
-      normName($(el).find(".product-name, .pdp-link, a.name, a.title").text()) ||
-      normName($(el).find("a").first().text());
-    const priceTxt =
-      $(el).find(".product-sales-price, .sales, .price, .value, .sales .value").first().text() ||
-      $(el).find("[data-test='product-price']").first().text();
-    const price = asNumber(priceTxt);
-    if (title) items.push({ source: "cruzverde", title, price, url });
-  });
-  return items;
+// ---- proveedores ----
+async function scrapeCruzVerde(product, browser) {
+  const url = "https://www.cruzverde.cl/search?q=" + encodeURIComponent(product);
+  const ctx = await browser.newContext({ userAgent: UA });
+  const page = await ctx.newPage();
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+  // esperar red (JS) y contenido
+  await page.waitForTimeout(WAIT);
+
+  const items = await extractProducts(page, [
+    ".product-tile", "li.product", "div.grid-tile", "[data-test*='product']",
+  ]);
+  await ctx.close();
+  return items.map(i => ({ source: "cruzverde", ...i, url }));
 }
 
-// SALCOBRAND
-async function searchSalcobrand(query) {
-  const url = "https://salcobrand.cl/search?q=" + encodeURIComponent(query.trim());
-  let html = "";
-  try { html = await fetchHTML(url); } catch {}
-  const $ = cheerio.load(html || "");
-  const items = [];
-  $("article, .product-item, .product, li, .card").each((_, el) => {
-    const title =
-      normName($(el).find(".product-title, .title, a.title, h3, h2").first().text()) ||
-      normName($(el).find("a").first().text());
-    const priceTxt = $(el).find(".price, .product-price, .current-price, .value").first().text();
-    const price = asNumber(priceTxt);
-    if (title) items.push({ source: "salcobrand", title, price, url });
-  });
-  return items;
+async function scrapeSalcobrand(product, browser) {
+  const url = "https://salcobrand.cl/search?q=" + encodeURIComponent(product);
+  const ctx = await browser.newContext({ userAgent: UA });
+  const page = await ctx.newPage();
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+  await page.waitForTimeout(WAIT);
+
+  const items = await extractProducts(page, [
+    "article", ".product-item", ".product", "li", ".card", "[data-testid*='product']",
+  ]);
+  await ctx.close();
+  return items.map(i => ({ source: "salcobrand", ...i, url }));
 }
 
-async function getRealPrices(query) {
-  const [cv, sb] = await Promise.allSettled([searchCruzVerde(query), searchSalcobrand(query)]);
-  const out = [];
-  if (cv.status === "fulfilled") out.push(...cv.value);
-  if (sb.status === "fulfilled") out.push(...sb.value);
-
-  const seen = new Set();
-  const dedup = out.filter((it) => {
-    const k = `${it.source}|${it.title.toLowerCase()}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-
-  dedup.sort((a, b) => {
-    const ap = a.price ?? Infinity;
-    const bp = b.price ?? Infinity;
-    if (ap !== bp) return ap - bp;
-    return a.title.localeCompare(b.title);
-  });
-  return dedup;
-}
-
+// ---- endpoint health ----
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "videsapp-api", ts: new Date().toISOString() });
 });
 
+// ---- endpoint prices ----
 app.get("/prices", async (req, res) => {
   const product = String(req.query.product || "").trim();
   if (!product) return res.status(400).json({ error: "Falta 'product'." });
 
+  let browser;
   try {
-    const items = await getRealPrices(product);
-    const prices = items.map(i => i.price).filter(p => Number.isFinite(p));
+    browser = await chromium.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      headless: true,
+    });
+
+    // corre proveedores en paralelo
+    const [cv, sb] = await Promise.allSettled([
+      scrapeCruzVerde(product, browser),
+      scrapeSalcobrand(product, browser),
+    ]);
+
+    const out = [];
+    if (cv.status === "fulfilled") out.push(...cv.value);
+    if (sb.status === "fulfilled") out.push(...sb.value);
+
+    // limpieza: dedup por source+title
+    const seen = new Set();
+    const dedup = out.filter((it) => {
+      const k = `${it.source}|${it.title.toLowerCase()}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+
+    // ordena: por precio válido y luego alfabético
+    dedup.sort((a, b) => {
+      const ap = a.price ?? Infinity;
+      const bp = b.price ?? Infinity;
+      if (ap !== bp) return ap - bp;
+      return a.title.localeCompare(b.title);
+    });
+
+    const prices = dedup.map(i => i.price).filter(p => Number.isFinite(p));
     const average = prices.length
       ? Math.round(prices.reduce((s, x) => s + x, 0) / prices.length)
       : null;
@@ -101,21 +126,24 @@ app.get("/prices", async (req, res) => {
     res.json({
       product,
       averagePrice: average,
-      count: items.length,
-      items,
+      count: dedup.length,
+      items: dedup,
       sources: ["cruzverde", "salcobrand"],
-      note: "Resultados desde buscadores web públicos; su HTML puede cambiar."
+      note: "Datos extraídos con navegador headless; sujetos a cambios de HTML/anti-bot."
     });
   } catch (err) {
     console.error("prices error:", err);
     res.status(500).json({ error: "Error al obtener precios", detail: String(err) });
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
+// raíz
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
-    message: "API VIDESAPP real (v1: CruzVerde + Salcobrand)",
+    message: "API VIDESAPP real (v2: Playwright)",
     docs: ["/health", "/prices?product=paracetamol", "/prices?product=ketoprofeno"]
   });
 });
