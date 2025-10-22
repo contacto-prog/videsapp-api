@@ -1,14 +1,14 @@
 {
   "name": "videsapp-api",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "API backend para MiPharmAPP",
   "type": "module",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "cors": "latest",
-    "express": "latest"
+    "express": "latest",
+    "got": "14.4.2",
+    "cheerio": "1.0.0-rc.12"
   }
 }
