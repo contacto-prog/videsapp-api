@@ -1,4 +1,3 @@
-// server.js (real data v1: CruzVerde + Salcobrand search scrapers)
 import express from "express";
 import cors from "cors";
 import got from "got";
@@ -8,7 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------- helpers ----------
 const UA = "MiPharmAPP/1.0 (+https://www.videsapp.com; contacto@videsapp.com)";
 const asNumber = (txt) => {
   if (!txt) return null;
@@ -25,12 +23,11 @@ async function fetchHTML(url) {
   }).text();
 }
 
-// ---------- provider: CRUZ VERDE ----------
+// CRUZ VERDE
 async function searchCruzVerde(query) {
   const url = "https://www.cruzverde.cl/search?q=" + encodeURIComponent(query.trim());
   const html = await fetchHTML(url);
   const $ = cheerio.load(html);
-
   const items = [];
   $(".product-tile, li.product, div.grid-tile").each((_, el) => {
     const title =
@@ -45,13 +42,12 @@ async function searchCruzVerde(query) {
   return items;
 }
 
-// ---------- provider: SALCOBRAND ----------
+// SALCOBRAND
 async function searchSalcobrand(query) {
   const url = "https://salcobrand.cl/search?q=" + encodeURIComponent(query.trim());
   let html = "";
-  try { html = await fetchHTML(url); } catch { /* ignore */ }
+  try { html = await fetchHTML(url); } catch {}
   const $ = cheerio.load(html || "");
-
   const items = [];
   $("article, .product-item, .product, li, .card").each((_, el) => {
     const title =
@@ -64,7 +60,6 @@ async function searchSalcobrand(query) {
   return items;
 }
 
-// ---------- merge ----------
 async function getRealPrices(query) {
   const [cv, sb] = await Promise.allSettled([searchCruzVerde(query), searchSalcobrand(query)]);
   const out = [];
@@ -88,7 +83,6 @@ async function getRealPrices(query) {
   return dedup;
 }
 
-// ---------- endpoints ----------
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "videsapp-api", ts: new Date().toISOString() });
 });
@@ -110,7 +104,7 @@ app.get("/prices", async (req, res) => {
       count: items.length,
       items,
       sources: ["cruzverde", "salcobrand"],
-      note: "Resultados obtenidos de buscadores web públicos; su estructura puede cambiar."
+      note: "Resultados desde buscadores web públicos; su HTML puede cambiar."
     });
   } catch (err) {
     console.error("prices error:", err);
