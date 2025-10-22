@@ -1,122 +1,130 @@
-// server.js
+// server.js (real data v1: CruzVerde + Salcobrand search scrapers)
 import express from "express";
 import cors from "cors";
+import got from "got";
+import * as cheerio from "cheerio";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- Mock de datos (ejemplo) ---
-const PHARMACIES = [
-  { id: "cruz-verde-001", name: "Cruz Verde Apoquindo", lat: -33.4104, lng: -70.5660 },
-  { id: "salcobrand-002", name: "Salcobrand Kennedy",    lat: -33.4037, lng: -70.5783 },
-  { id: "ahumada-003",   name: "Ahumada Las Condes",     lat: -33.4145, lng: -70.5991 },
-  { id: "pf-004",        name: "Pet Farmacia Vitacura",  lat: -33.3826, lng: -70.5748 },
-];
-
-// Diccionario “producto → precios por farmacia”
-const PRICE_CATALOG = {
-  paracetamol: {
-    "cruz-verde-001": 1490,
-    "salcobrand-002": 1590,
-    "ahumada-003": 1690,
-  },
-  ketoprofeno: {
-    "cruz-verde-001": 3990,
-    "salcobrand-002": 3890,
-    "ahumada-003": 4190,
-    "pf-004": 3990,
-  },
+// ---------- helpers ----------
+const UA = "MiPharmAPP/1.0 (+https://www.videsapp.com; contacto@videsapp.com)";
+const asNumber = (txt) => {
+  if (!txt) return null;
+  const n = Number(txt.replace(/\./g, "").replace(/,/g, ".").replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : null;
 };
+const normName = (s) => String(s || "").replace(/\s+/g, " ").trim();
 
-// --- Utiles ---
-const toRad = (deg) => (deg * Math.PI) / 180;
-function distanceMeters(a, b) {
-  const R = 6371000;
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const x =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.sin(dLng / 2) * Math.sin(dLng / 2) * Math.cos(lat1) * Math.cos(lat2);
-  const d = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-  return R * d;
+async function fetchHTML(url) {
+  return got(url, {
+    timeout: { request: 10000 },
+    headers: { "user-agent": UA, accept: "text/html, */*" },
+    https: { rejectUnauthorized: true },
+  }).text();
 }
 
-// --- Endpoints ---
+// ---------- provider: CRUZ VERDE ----------
+async function searchCruzVerde(query) {
+  const url = "https://www.cruzverde.cl/search?q=" + encodeURIComponent(query.trim());
+  const html = await fetchHTML(url);
+  const $ = cheerio.load(html);
+
+  const items = [];
+  $(".product-tile, li.product, div.grid-tile").each((_, el) => {
+    const title =
+      normName($(el).find(".product-name, .pdp-link, a.name, a.title").text()) ||
+      normName($(el).find("a").first().text());
+    const priceTxt =
+      $(el).find(".product-sales-price, .sales, .price, .value, .sales .value").first().text() ||
+      $(el).find("[data-test='product-price']").first().text();
+    const price = asNumber(priceTxt);
+    if (title) items.push({ source: "cruzverde", title, price, url });
+  });
+  return items;
+}
+
+// ---------- provider: SALCOBRAND ----------
+async function searchSalcobrand(query) {
+  const url = "https://salcobrand.cl/search?q=" + encodeURIComponent(query.trim());
+  let html = "";
+  try { html = await fetchHTML(url); } catch { /* ignore */ }
+  const $ = cheerio.load(html || "");
+
+  const items = [];
+  $("article, .product-item, .product, li, .card").each((_, el) => {
+    const title =
+      normName($(el).find(".product-title, .title, a.title, h3, h2").first().text()) ||
+      normName($(el).find("a").first().text());
+    const priceTxt = $(el).find(".price, .product-price, .current-price, .value").first().text();
+    const price = asNumber(priceTxt);
+    if (title) items.push({ source: "salcobrand", title, price, url });
+  });
+  return items;
+}
+
+// ---------- merge ----------
+async function getRealPrices(query) {
+  const [cv, sb] = await Promise.allSettled([searchCruzVerde(query), searchSalcobrand(query)]);
+  const out = [];
+  if (cv.status === "fulfilled") out.push(...cv.value);
+  if (sb.status === "fulfilled") out.push(...sb.value);
+
+  const seen = new Set();
+  const dedup = out.filter((it) => {
+    const k = `${it.source}|${it.title.toLowerCase()}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  dedup.sort((a, b) => {
+    const ap = a.price ?? Infinity;
+    const bp = b.price ?? Infinity;
+    if (ap !== bp) return ap - bp;
+    return a.title.localeCompare(b.title);
+  });
+  return dedup;
+}
+
+// ---------- endpoints ----------
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "videsapp-api", ts: new Date().toISOString() });
 });
 
-/**
- * GET /prices?product=ketoprofeno&lat=-33.44&lng=-70.65&radius=5000
- */
-app.get("/prices", (req, res) => {
-  const product = String(req.query.product || "").trim().toLowerCase();
-  const lat = req.query.lat ? Number(req.query.lat) : null;
-  const lng = req.query.lng ? Number(req.query.lng) : null;
-  const radius = req.query.radius ? Number(req.query.radius) : 5000; // m
+app.get("/prices", async (req, res) => {
+  const product = String(req.query.product || "").trim();
+  if (!product) return res.status(400).json({ error: "Falta 'product'." });
 
-  if (!product) {
-    return res.status(400).json({ error: "Falta el parámetro 'product'." });
-  }
+  try {
+    const items = await getRealPrices(product);
+    const prices = items.map(i => i.price).filter(p => Number.isFinite(p));
+    const average = prices.length
+      ? Math.round(prices.reduce((s, x) => s + x, 0) / prices.length)
+      : null;
 
-  // “Proveedor” mock: lee del catálogo en memoria
-  const priceMap = PRICE_CATALOG[product] || {};
-  const items = PHARMACIES.map((ph) => {
-    const price = priceMap[ph.id] ?? null;
-    const hasCoords = lat !== null && lng !== null;
-    const dist = hasCoords ? Math.round(distanceMeters({ lat, lng }, ph)) : null;
-
-    return {
-      pharmacyId: ph.id,
-      pharmacy: ph.name,
-      price, // null si no hay precio en este mock
-      distance_m: dist, // null si no envías lat/lng
-      lat: ph.lat,
-      lng: ph.lng,
-    };
-  })
-    // si enviaste lat/lng y radius, filtramos por radio
-    .filter((it) => (lat && lng ? (it.distance_m ?? Infinity) <= radius : true))
-    // orden: primero por precio (si existe), luego por distancia
-    .sort((a, b) => {
-      const ap = a.price ?? Infinity;
-      const bp = b.price ?? Infinity;
-      if (ap !== bp) return ap - bp;
-      const ad = a.distance_m ?? Infinity;
-      const bd = b.distance_m ?? Infinity;
-      return ad - bd;
+    res.json({
+      product,
+      averagePrice: average,
+      count: items.length,
+      items,
+      sources: ["cruzverde", "salcobrand"],
+      note: "Resultados obtenidos de buscadores web públicos; su estructura puede cambiar."
     });
-
-  const pricesOnly = items.map((i) => i.price).filter((p) => typeof p === "number");
-  const average =
-    pricesOnly.length ? Math.round(pricesOnly.reduce((s, x) => s + x, 0) / pricesOnly.length) : null;
-
-  res.json({
-    product,
-    averagePrice: average, // promedio simple de los disponibles
-    count: items.length,
-    items,
-    note:
-      pricesOnly.length
-        ? "Precios de ejemplo (mock). Próximamente: fuentes reales."
-        : "Sin precios en el mock para este producto. Próximamente: fuentes reales.",
-  });
+  } catch (err) {
+    console.error("prices error:", err);
+    res.status(500).json({ error: "Error al obtener precios", detail: String(err) });
+  }
 });
 
-// Raíz informativa
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
-    message: "API Videsapp funcionando",
-    docs: ["/health", "/prices?product=paracetamol", "/prices?product=ketoprofeno&lat=-33.44&lng=-70.65&radius=5000"],
+    message: "API VIDESAPP real (v1: CruzVerde + Salcobrand)",
+    docs: ["/health", "/prices?product=paracetamol", "/prices?product=ketoprofeno"]
   });
 });
 
-// Render/Heroku usan PORT; local usa 10000
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
