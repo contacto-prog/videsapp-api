@@ -1,11 +1,11 @@
 {
   "name": "videsapp-api",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Backend API para MiPharmAPP – VIDESAPP SpA",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "postinstall": "PUPPETEER_CACHE_DIR=/opt/render/.cache/puppeteer npx puppeteer browsers install chrome",
+    "postinstall": "PUPPETEER_CACHE_DIR=.puppeteer npx puppeteer browsers install chrome",
     "start": "node server.js"
   },
   "dependencies": {
