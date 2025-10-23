@@ -1,12 +1,12 @@
 {
   "name": "videsapp-api",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Backend API para MiPharmAPP – VIDESAPP SpA",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "build": "echo 'No build step required'"
+    "build": "npx puppeteer browsers install chrome",
+    "start": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
