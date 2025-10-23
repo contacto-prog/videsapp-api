@@ -1,15 +1,28 @@
 {
   "name": "videsapp-api",
-  "version": "1.4.0",
-  "description": "API backend para MiPharmAPP",
+  "version": "1.5.0",
+  "description": "Backend API para MiPharmAPP – VIDESAPP SpA",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "echo 'No build step required'"
   },
   "dependencies": {
-    "cors": "latest",
-    "express": "latest",
-    "puppeteer": "23.8.0"
-  }
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer": "^23.8.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "keywords": [
+    "videsapp",
+    "mipharmapp",
+    "pharmacies",
+    "scraper",
+    "api"
+  ],
+  "author": "VIDESAPP SpA",
+  "license": "MIT"
 }
