@@ -1,5 +1,4 @@
-// scrapers/drsimi.js
-import { robustFirstPrice, tryDismissCookieBanners } from './utils.js';
+import { robustFirstPrice, tryDismissCookieBanners, sleep } from './utils.js';
 
 export const sourceId = 'drsimi';
 
@@ -8,7 +7,7 @@ export async function fetchDrSimi(page, product) {
   const url = `https://www.drsimi.cl/search?q=${q}`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await tryDismissCookieBanners(page);
-  await page.waitForTimeout(1200);
+  await sleep(1200);
 
   const price = await robustFirstPrice(page, ['.price', '.precio', '.product-price', '.productbox-price']);
   const title = await page.$eval('title', el => el.innerText).catch(() => product);
