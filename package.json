@@ -1,11 +1,11 @@
 {
   "name": "videsapp-api",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Backend API para MiPharmAPP – VIDESAPP SpA",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "build": "npx puppeteer browsers install chrome",
+    "postinstall": "PUPPETEER_CACHE_DIR=/opt/render/.cache/puppeteer npx puppeteer browsers install chrome",
     "start": "node server.js"
   },
   "dependencies": {
@@ -13,16 +13,6 @@
     "express": "^4.19.2",
     "puppeteer": "^23.8.0"
   },
-  "engines": {
-    "node": ">=18.x"
-  },
-  "keywords": [
-    "videsapp",
-    "mipharmapp",
-    "pharmacies",
-    "scraper",
-    "api"
-  ],
-  "author": "VIDESAPP SpA",
+  "engines": { "node": ">=18.x" },
   "license": "MIT"
 }
