@@ -34,6 +34,7 @@ export async function scrapePrices(product) {
 
   const browser = await puppeteer.launch({
     headless: 'new',
+    executablePath: puppeteer.excutablePath(),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
