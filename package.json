@@ -1,6 +1,6 @@
 {
   "name": "videsapp-api",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Backend API para MiPharmAPP – VIDESAPP SpA",
   "type": "module",
   "main": "server.js",
@@ -13,6 +13,8 @@
     "express": "^4.19.2",
     "puppeteer": "^23.8.0"
   },
-  "engines": { "node": ">=18.x" },
+  "engines": {
+    "node": "22.x"
+  },
   "license": "MIT"
 }
