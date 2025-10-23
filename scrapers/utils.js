@@ -1,4 +1,5 @@
 // scrapers/utils.js
+export const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 export function normalizeProduct(q) {
   return (q || "").trim().toLowerCase();
 }
