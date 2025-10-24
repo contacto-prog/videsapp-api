@@ -1,71 +1,23 @@
 // scrapers/ahumada.js
-import {
-  sleep, tryDismissCookieBanners, safeGoto, autoScroll,
-  pickCards, normalize, parsePrice, tryVtexSearch
-} from './utils.js';
+import * as cheerio from 'cheerio';
 
-export const sourceId = 'ahumada';
-
-export async function fetchAhumada(page, product) {
-  const q = encodeURIComponent(product);
-
-  // 👇 Dominio correcto para Chile (VTEX): www.farmaciasahumada.cl
-  const candidates = [
-    `https://www.farmaciasahumada.cl/search?q=${q}`,
-    `https://www.farmaciasahumada.cl/s?q=${q}`,
-    `https://www.farmaciasahumada.cl/search?text=${q}`,
-  ];
-
-  await page.setViewport({ width: 1280, height: 900 });
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36');
-
-  // 1) Ir a la tienda (mismo origen) y probar VTEX primero (rápido)
-  let loaded = false;
-  for (const url of candidates) {
-    loaded = await safeGoto(page, url, 20000);
-    if (loaded) break;
-  }
-  if (!loaded) return [];
-
-  const apiItems = await tryVtexSearch(page, product, (p) => ({
-    title: p.title,
-    price: p.price,
-    url: p.url ? new URL(p.url, page.url()).href : page.url(),
-    source: sourceId,
-  }));
-  if (apiItems.length) return apiItems;
-
-  // 2) Fallback DOM (por si la API no devuelve nada)
-  await tryDismissCookieBanners(page);
-  await autoScroll(page, { steps: 18, delay: 250 });
-
-  const items = await pickCards(page, {
-    cards: '.vtex-product-summary-2-x-container, .product-item, [data-testid*="product"], [data-sku], [data-sku-id]',
-    name: [
-      '.vtex-product-summary-2-x-productBrand',
-      '.vtex-product-summary-2-x-productName',
-      '.product-item .name',
-      '[data-testid*="name"]',
-      'h3 a', 'h3', 'a[title]',
-    ],
-    price: [
-      '.vtex-product-price-1-x-sellingPriceValue',
-      '.vtex-product-price-1-x-currencyInteger',
-      '.vtex-product-price-1-x-sellingPrice',
-      '.selling-price__value',
-      '[data-testid*="price"]',
-      '[data-price]',
-      'span[class*="price"]',
-      '.best-price',
-      '.price, .fa-price, .price__current',
-    ],
-    link: ['a[href]'],
+export function parseAhumadaSearch(html, baseUrl){
+  const $ = cheerio.load(html);
+  const links = new Set();
+  // Toma todos los <a> que parecen tarjeta de producto
+  $('a[href*="/product"], a[href*="/producto"], a[href*="/medicamento"], a[href*="/products"]').each((_,a)=>{
+    const href = $(a).attr('href');
+    if(href && !href.includes('#')) links.add(new URL(href, baseUrl).toString());
   });
-
-  return items.map(x => {
-    const title = normalize(x.name);
-    const price = parsePrice(x.price);
-    if (!Number.isFinite(price) || !title) return null;
-    return { title, price, url: x.link || page.url(), source: sourceId };
-  }).filter(Boolean);
+  // Fallback: captura cualquier <a> cercano a un nodo que contenga un precio
+  if(links.size===0){
+    $('a').each((_,a)=>{
+      const $a=$(a); const near = $a.parent().text();
+      if(/\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?/.test(near)) {
+        const href = $a.attr('href');
+        if(href) links.add(new URL(href, baseUrl).toString());
+      }
+    });
+  }
+  return Array.from(links);
 }
