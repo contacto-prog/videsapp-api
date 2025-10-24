@@ -113,15 +113,11 @@ export async function autoScroll(page, { steps = 10, delay = 300 } = {}) {
 
 /* === VTEX helpers === */
 
-// Intenta leer precios desde window.__STATE__ (muy común en VTEX)
 async function tryVtexState(page) {
   try {
     const state = await page.evaluate(() => {
-      // algunos sitios lo exponen en window.__STATE__ o en un script con id/state
-      // devolvemos un objeto simplificado para parsearlo acá afuera
       const w = window;
       if (w && w.__STATE__) return JSON.stringify(w.__STATE__);
-      // fallback: busca <script> con __STATE__ en texto
       const scripts = Array.from(document.querySelectorAll('script'));
       for (const s of scripts) {
         const t = s.textContent || '';
@@ -132,7 +128,6 @@ async function tryVtexState(page) {
     if (!state) return [];
 
     const text = String(state);
-    // Heurística: busca bloques con commertialOffer y Price
     const items = [];
     const re = /"commertialOffer"\s*:\s*\{[^}]*"Price"\s*:\s*([0-9.]+)[^}]*\}[^}]*\}\s*,\s*"name"\s*:\s*"([^"]+)"/gi;
     let m;
@@ -142,7 +137,7 @@ async function tryVtexState(page) {
       if (title && Number.isFinite(price)) {
         items.push({ title, price, url: null });
       }
-      if (items.length >= 20) break;
+      if (items.length >= 40) break;
     }
     return items;
   } catch {
@@ -150,26 +145,31 @@ async function tryVtexState(page) {
   }
 }
 
-// VTEX: prueba varias rutas + paginación y devuelve [{title, price, url}]
+// VTEX: intelligent-search + search clásico + sc=1 y paginación amplia
 export async function tryVtexSearch(page, product, mapItem = (p) => p) {
   try {
     const q = String(product || '').trim();
     if (!q) return [];
 
     const bases = [
+      // Intelligent Search (muchos retailers nuevos lo usan)
+      `/_v/api/intelligent-search/product_search/v1/?ft=${encodeURIComponent(q)}`,
+      // Clásicos
       `/api/catalog_system/pub/products/search/${encodeURIComponent(q)}`,
       `/api/catalog_system/pub/products/search/?ft=${encodeURIComponent(q)}`,
       `/api/catalog_system/pub/products/search/?fq=ft:${encodeURIComponent(q)}`
     ];
 
-    // intentamos varias ventanas de paginación
+    const scs = ['', '&sc=1', '&sc=2'];         // algunos usan sc=1
+    const orders = ['', '&O=OrderByPriceASC'];  // orden por precio como variante
     const windows = [
       { from: 0, to: 19 },
       { from: 0, to: 40 },
-      { from: 0, to: 60 }
+      { from: 0, to: 60 },
+      { from: 0, to: 100 }
     ];
 
-    const data = await page.evaluate(async (bases_, windows_) => {
+    const data = await page.evaluate(async (bases_, scs_, orders_, windows_) => {
       const tryFetch = async (url) => {
         try {
           const r = await fetch(url, { credentials: 'include' });
@@ -180,26 +180,48 @@ export async function tryVtexSearch(page, product, mapItem = (p) => p) {
         } catch { return null; }
       };
 
-      // 1) rutas sin paginación
+      // 1) bases sin paginación (puras)
       for (const b of bases_) {
         const j = await tryFetch(b);
         if (j) return j;
       }
-      // 2) rutas con paginación
+      // 2) combinaciones con sc y order
+      for (const b of bases_) {
+        for (const s of scs_) {
+          for (const o of orders_) {
+            const j = await tryFetch(`${b}${b.includes('?') ? '' : '?'}${b.includes('?') ? '' : ''}${s}${o}`.replace(/\?\&/, '?'));
+            if (j) return j;
+          }
+        }
+      }
+      // 3) paginación amplia
       for (const b of bases_) {
         for (const w of windows_) {
-          const url = b.includes('?') ? `${b}&_from=${w.from}&_to=${w.to}` : `${b}?_from=${w.from}&_to=${w.to}`;
-          const j = await tryFetch(url);
+          const sep = b.includes('?') ? '&' : '?';
+          const j = await tryFetch(`${b}${sep}_from=${w.from}&_to=${w.to}`);
           if (j) return j;
         }
       }
+      // 4) combinando todo (sc + order + paginación)
+      for (const b of bases_) {
+        for (const s of scs_) {
+          for (const o of orders_) {
+            for (const w of windows_) {
+              const sep = b.includes('?') ? '&' : '?';
+              const url = `${b}${sep}_from=${w.from}&_to=${w.to}${s}${o}`.replace(/\?\&/, '?');
+              const j = await tryFetch(url);
+              if (j) return j;
+            }
+          }
+        }
+      }
       return null;
-    }, bases, windows);
+    }, bases, scs, orders, windows);
 
     if (Array.isArray(data) && data.length) {
       const out = [];
       for (const p of data) {
-        const name = p?.productName || p?.productTitle || p?.productReference || '';
+        const name = p?.productName || p?.productTitle || p?.productReference || p?.productNameWithTag || '';
         const sku = p?.items?.[0];
         const seller = sku?.sellers?.[0];
         const price = seller?.commertialOffer?.Price ?? seller?.commertialOffer?.price ?? null;
@@ -213,11 +235,9 @@ export async function tryVtexSearch(page, product, mapItem = (p) => p) {
       if (out.length) return out;
     }
 
-    // 3) último intento: __STATE__ de VTEX en la página
+    // 5) Último intento: __STATE__
     const stateItems = await tryVtexState(page);
-    if (stateItems.length) {
-      return stateItems.map(mapItem);
-    }
+    if (stateItems.length) return stateItems.map(mapItem);
 
     return [];
   } catch {
