@@ -1,5 +1,5 @@
 import {
-  sleep, tryDismissCookieBanners, safeGoto, pickCards, normalize, parsePrice,
+  sleep, tryDismissCookieBanners, safeGoto, autoScroll, pickCards, normalize, parsePrice, tryVtexSearch,
 } from './utils.js';
 
 export const sourceId = 'salcobrand';
@@ -13,22 +13,19 @@ export async function fetchSalcobrand(page, product) {
   ];
 
   await page.setViewport({ width: 1280, height: 900 });
-
   let loaded = false;
   for (const url of candidates) {
-    loaded = await safeGoto(page, url, 25000);
+    loaded = await safeGoto(page, url, 20000);
     if (!loaded) continue;
-    await tryDismissCookieBanners(page, ['#onetrust-accept-btn-handler', 'button:has-text("Aceptar")']);
-    await sleep(1000);
-    const ok = await page.waitForFunction(
-      () => !!document.querySelector('.vtex-product-summary-2-x-container, .product-item, .product-card, [data-sku]'),
-      { timeout: 8000 }
-    ).catch(() => null);
+    await tryDismissCookieBanners(page);
+    await sleep(300);
+    await autoScroll(page, { steps: 12, delay: 220 });
+    const ok = await page.$('.vtex-product-summary-2-x-container, .product-item, .product-card, [data-sku], [data-testid*="product"]');
     if (ok) break;
   }
   if (!loaded) return [];
 
-  const items = await pickCards(page, {
+  let items = await pickCards(page, {
     cards: '.vtex-product-summary-2-x-container, .product-item, .product-card, [data-sku], [data-testid*="product"]',
     name: [
       '.vtex-product-summary-2-x-productBrand, .vtex-product-summary-2-x-productName',
@@ -42,6 +39,16 @@ export async function fetchSalcobrand(page, product) {
     link: ['a[href]'],
   });
 
+  if (!items.length) {
+    const apiItems = await tryVtexSearch(page, product, (p) => ({
+      title: p.title,
+      price: p.price,
+      url: p.url ? new URL(p.url, page.url()).href : page.url(),
+      source: sourceId,
+    }));
+    if (apiItems.length) return apiItems;
+  }
+
   return items.map(x => {
     const title = normalize(x.name);
     const price = parsePrice(x.price);
@@ -49,4 +56,3 @@ export async function fetchSalcobrand(page, product) {
     return { title, price, url: x.link || page.url(), source: sourceId };
   }).filter(Boolean);
 }
-
