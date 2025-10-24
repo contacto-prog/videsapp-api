@@ -1,46 +1,31 @@
-// scrapers/farmaexpress.js
-import {
-  sleep, tryDismissCookieBanners, safeGoto, autoScroll,
-  pickCards, normalize, parsePrice, tryVtexSearch
-} from './utils.js';
+// scrapers/farmex.js
+import * as cheerio from 'cheerio';
 
-export const sourceId = 'farmaexpress';
+export function parseFarmex(html, url){
+  const $ = cheerio.load(html);
+  const text = $('body').text().replace(/\s+/g,' ').trim();
 
-export async function fetchFarmaexpress(page, product) {
-  const q = encodeURIComponent(product);
-  const url = `https://www.farmaexpress.cl/search?q=${q}`;
+  const name = $('h1, .product-title').first().text().trim() || (text.match(/Paracetamol.*?(comprimidos|tabletas)/i)?.[0] ?? '');
+  const anyPrice = text.match(/\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
+  const availability = /Agregar al carro|Disponible/i.test(text)
+    ? 'in_stock'
+    : (/Agotado|Sin stock/i.test(text) ? 'out_of_stock' : 'unknown');
 
-  await page.setViewport({ width: 1280, height: 900 });
-  if (!await safeGoto(page, url, 20000)) return [];
+  const strength = (text.match(/(\d+)\s*mg/i)?.[1]) || null;
+  const pack = (text.match(/x\s*(\d+)\s*(Comprimidos?|Tabletas?)/i)?.[1]) || (text.match(/\b(\d+)\s*Comprimidos?\b/i)?.[1]) || null;
+  const form = (text.match(/\d+\s*(Comprimidos?|Tabletas?)/i)?.[1]) || null;
 
-  const apiItems = await tryVtexSearch(page, product, (p) => ({
-    title: p.title,
-    price: p.price,
-    url: p.url ? new URL(p.url, page.url()).href : page.url(),
-    source: sourceId,
-  }));
-  if (apiItems.length) return apiItems;
+  const toNumber = (s)=> s ? Number(s.replace(/\./g,'').replace(',','.')) : undefined;
 
-  await tryDismissCookieBanners(page);
-  await autoScroll(page, { steps: 18, delay: 250 });
-
-  const items = await pickCards(page, {
-    cards: '.product-item, .vtex-product-summary-2-x-container, [data-sku], [data-testid*="product"]',
-    name: [
-      '.product-name, .name, .vtex-product-summary-2-x-productBrand, .vtex-product-summary-2-x-productName',
-      'h3, a[title]',
-    ],
-    price: [
-      '.best-price, .price, .vtex-product-price-1-x-sellingPriceValue, .vtex-product-price-1-x-sellingPrice',
-      '[data-price]',
-    ],
-    link: ['a[href]'],
-  });
-
-  return items.map(x => {
-    const title = normalize(x.name);
-    const price = parsePrice(x.price);
-    if (!Number.isFinite(price) || !title) return null;
-    return { title, price, url: x.link || page.url(), source: sourceId };
-  }).filter(Boolean);
+  return {
+    source: 'farmex',
+    url,
+    name,
+    active: 'Paracetamol',
+    strength_mg: strength ? Number(strength) : undefined,
+    form,
+    pack,
+    price: anyPrice ? toNumber(anyPrice[0].replace('$','')) : undefined,
+    availability,
+  };
 }
