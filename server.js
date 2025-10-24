@@ -22,6 +22,12 @@ const ENABLE_SCRAPER = (process.env.ENABLE_SCRAPER || 'true') === 'true';
 const PER_SOURCE_TIMEOUT = Number(process.env.PER_SOURCE_TIMEOUT_MS || 25000);
 const CONCURRENCY = Math.min(Math.max(Number(process.env.SCRAPER_CONCURRENCY || 2), 1), 4);
 
+// Para ver claramente qué llega al server
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.url}`);
+  next();
+});
+
 const SOURCES = [
   { id: ahumadaId, run: fetchAhumada },
   { id: cruzverdeId, run: fetchCruzVerde },
@@ -30,13 +36,13 @@ const SOURCES = [
   { id: salcoId, run: fetchSalcobrand },
 ];
 
-/* ---------- Root OK (evita 502/404 en /) ---------- */
+/* ---------- Root OK ---------- */
 app.get('/', (_req, res) => {
-  res.type('text/plain').send('VIDESAPP API – OK. Use /health or /prices?product=paracetamol');
+  res.type('text/plain').send('VIDESAPP API – OK. Usa /health o /prices?product=paracetamol');
 });
 
-/* ---------- Healthcheck ---------- */
-app.get('/health', async (_req, res) => {
+/* ---------- Health ---------- */
+app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'videsapp-prices',
@@ -46,25 +52,44 @@ app.get('/health', async (_req, res) => {
   });
 });
 
+/* ---------- Debug ---------- */
+app.get('/debug/ping', (_req, res) => {
+  res.json({ ok: true, pong: Date.now() });
+});
+
+app.get('/debug/puppeteer', async (_req, res) => {
+  try {
+    const browser = await puppeteer.launch({
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    });
+    const page = await browser.newPage();
+    await page.goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const title = await page.title().catch(() => null);
+    await browser.close().catch(() => {});
+    res.json({ ok: true, title });
+  } catch (err) {
+    console.error('[DEBUG/PUPPETEER] error:', err);
+    res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
 /* ---------- Helpers ---------- */
 function withTimeout(promiseFactory, ms) {
   const t = new Promise((_, rej) => setTimeout(() => rej(new Error('source_timeout')), ms));
   return Promise.race([promiseFactory(), t]);
 }
-
 function avg(nums) {
   const arr = nums.filter((n) => Number.isFinite(n));
   if (!arr.length) return null;
   return Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
 }
-
 async function launchBrowser() {
   return puppeteer.launch({
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
 }
-
 async function runWithConcurrency(items, limit, fn) {
   const out = Array(items.length);
   let i = 0;
@@ -82,6 +107,13 @@ async function runWithConcurrency(items, limit, fn) {
 
 /* ---------- Endpoint principal ---------- */
 app.get('/prices', async (req, res) => {
+  // Evita que Render corte por inactividad del socket (ajusta si hace falta)
+  res.setTimeout(120000);
+  // No-cache
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
   try {
     if (!ENABLE_SCRAPER) {
       return res.status(503).json({ ok: false, error: 'scraper_disabled' });
@@ -92,6 +124,8 @@ app.get('/prices', async (req, res) => {
     }
 
     const started = Date.now();
+    console.log(`[PRICES] start product="${product}" conc=${CONCURRENCY} timeout=${PER_SOURCE_TIMEOUT}`);
+
     const browser = await launchBrowser();
 
     try {
@@ -101,7 +135,7 @@ app.get('/prices', async (req, res) => {
         try {
           page = await browser.newPage();
 
-          // Bloqueo de recursos pesados/trackers para acelerar
+          // Bloqueo de recursos pesados/trackers
           try {
             await page.setRequestInterception(true);
             page.on('request', (reqq) => {
@@ -124,7 +158,7 @@ app.get('/prices', async (req, res) => {
             source: it.source || src.id,
           }));
           const prices = mapped.map((x) => x.price).filter((n) => Number.isFinite(n));
-          return {
+          const ret = {
             source: src.id,
             ok: true,
             count: mapped.length,
@@ -132,8 +166,10 @@ app.get('/prices', async (req, res) => {
             tookMs: Date.now() - t0,
             items: mapped,
           };
+          console.log(`[PRICES] ${src.id} ok count=${ret.count} took=${ret.tookMs}ms`);
+          return ret;
         } catch (e) {
-          return {
+          const errRet = {
             source: src.id,
             ok: false,
             error: String(e && e.message ? e.message : e),
@@ -141,6 +177,8 @@ app.get('/prices', async (req, res) => {
             tookMs: Date.now() - t0,
             items: [],
           };
+          console.error(`[PRICES] ${src.id} FAIL after ${errRet.tookMs}ms ->`, errRet.error);
+          return errRet;
         } finally {
           try { if (page) await page.close(); } catch {}
         }
@@ -149,12 +187,7 @@ app.get('/prices', async (req, res) => {
       const allPrices = results.flatMap((r) => r.items.map((x) => x.price));
       const overall = avg(allPrices);
 
-      // No-cache headers
-      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.set('Pragma', 'no-cache');
-      res.set('Expires', '0');
-
-      res.json({
+      const payload = {
         ok: true,
         product,
         tookMs: Date.now() - started,
@@ -162,11 +195,15 @@ app.get('/prices', async (req, res) => {
         perSourceTimeoutMs: PER_SOURCE_TIMEOUT,
         average: overall,
         sources: results,
-      });
+      };
+
+      console.log(`[PRICES] done took=${payload.tookMs}ms avg=${payload.average}`);
+      res.json(payload);
     } finally {
       try { await browser.close(); } catch {}
     }
   } catch (err) {
+    console.error('[PRICES] top-level error:', err);
     res.status(500).json({ ok: false, error: String(err) });
   }
 });
@@ -180,6 +217,10 @@ app.use((req, res) => {
 const server = app.listen(PORT, () => {
   console.log(`API listening on ${PORT}`);
 });
+
+// Captura errores no manejados que tumban el proceso (causan 502)
+process.on('unhandledRejection', (r) => console.error('[unhandledRejection]', r));
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
 
 async function shutdown() {
   console.log('Shutting down...');
