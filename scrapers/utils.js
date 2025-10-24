@@ -84,9 +84,8 @@ export async function tryDismissCookieBanners(page) {
   } catch {}
 }
 
-/* ===== Nuevas helpers para robustez ===== */
+/* ===== Robustez adicional ===== */
 
-// Navegación tolerante (evita colgarse con networkidle)
 export async function safeGoto(page, url, timeout = 20000) {
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
@@ -101,51 +100,55 @@ export async function safeGoto(page, url, timeout = 20000) {
   }
 }
 
-// Scroll incremental para gatillar lazy-load
 export async function autoScroll(page, { steps = 10, delay = 300 } = {}) {
   try {
     for (let i = 0; i < steps; i++) {
-      await page.evaluate(() => {
-        window.scrollBy(0, Math.ceil(window.innerHeight * 0.8));
-      });
+      await page.evaluate(() => { window.scrollBy(0, Math.ceil(window.innerHeight * 0.8)); });
       await sleep(delay);
     }
-    // subir un poco por si aparecen elementos al retroceder
     await page.evaluate(() => window.scrollTo(0, Math.max(0, window.scrollY - 200)));
     await sleep(200);
   } catch {}
 }
 
-// VTEX fallback: usa la API pública del storefront (mismo origen)
+// VTEX: intenta varias rutas y devuelve [{title, price, url}]
 export async function tryVtexSearch(page, product, mapItem = (p) => p) {
   try {
-    const q = encodeURIComponent(product);
-    const data = await page.evaluate(async (q_) => {
-      const url = `/api/catalog_system/pub/products/search/${q_}`;
-      try {
-        const r = await fetch(url, { credentials: 'include' });
-        if (!r.ok) return null;
-        return await r.json();
-      } catch {
-        return null;
+    const q = String(product || '').trim();
+    if (!q) return [];
+    const urls = [
+      `/api/catalog_system/pub/products/search/${encodeURIComponent(q)}`,
+      `/api/catalog_system/pub/products/search/?ft=${encodeURIComponent(q)}&_from=0&_to=20`
+    ];
+    const data = await page.evaluate(async (urlList) => {
+      for (const u of urlList) {
+        try {
+          const r = await fetch(u, { credentials: 'include' });
+          if (!r.ok) continue;
+          const j = await r.json();
+          if (Array.isArray(j) && j.length) return j;
+        } catch {}
       }
-    }, q);
+      return null;
+    }, urls);
 
     if (!Array.isArray(data) || !data.length) return [];
 
     const out = [];
     for (const p of data) {
       const name = p?.productName || p?.productTitle || p?.productReference || '';
-      // primer SKU/oferta
       const sku = p?.items?.[0];
       const seller = sku?.sellers?.[0];
       const price = seller?.commertialOffer?.Price ?? seller?.commertialOffer?.price ?? null;
-      const link = p?.link || p?.linkText ? `/${p.linkText}/p` : null;
+      let link = null;
+      if (p?.link) link = p.link;
+      else if (p?.linkText) link = `/${p.linkText}/p`;
+
       if (name && Number.isFinite(price)) {
         out.push(mapItem({
           title: name,
           price: Math.round(price),
-          url: link,
+          url: link || null,
         }));
       }
     }
@@ -155,7 +158,6 @@ export async function tryVtexSearch(page, product, mapItem = (p) => p) {
   }
 }
 
-// Toma tarjetas y extrae name/price/link con varios selectores
 export async function pickCards(page, sels) {
   const { cards, name = [], price = [], link = [] } = sels;
   return await page.$$eval(cards, (nodes, nameSels, priceSels, linkSels) => {
@@ -181,11 +183,11 @@ export async function pickCards(page, sels) {
   }, name, price, link).catch(() => []);
 }
 
-// Normaliza y parsea precios desde strings generales
 export function normalize(str) {
   if (!str) return '';
   return String(str).replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
 }
+
 export function parsePrice(text) {
   if (!text) return NaN;
   let t = String(text).replace(/[^\d.,-]/g, '').replace(/\s+/g, '').trim();
