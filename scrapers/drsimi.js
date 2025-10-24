@@ -1,15 +1,59 @@
-import { robustFirstPrice, tryDismissCookieBanners, sleep } from './utils.js';
+// scrapers/drsimi.js
+import {
+  sleep,
+  tryDismissCookieBanners,
+  safeGoto,
+  pickCards,
+  normalize,
+  parsePrice,
+} from './utils.js';
 
 export const sourceId = 'drsimi';
 
-export async function fetchDrSimi(page, product) {
+export async function fetchDrsimi(page, product) {
   const q = encodeURIComponent(product);
-  const url = `https://www.drsimi.cl/search?q=${q}`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await tryDismissCookieBanners(page);
-  await sleep(1200);
+  const candidates = [
+    `https://www.drsimi.cl/search?q=${q}`,
+    `https://www.drsimi.cl/s?q=${q}`
+  ];
 
-  const price = await robustFirstPrice(page, ['.price', '.precio', '.product-price', '.productbox-price']);
-  const title = await page.$eval('title', el => el.innerText).catch(() => product);
-  return price ? [{ title, price, url, source: sourceId }] : [];
+  await page.setViewport({ width: 1280, height: 900 });
+
+  let loaded = false;
+  for (const url of candidates) {
+    loaded = await safeGoto(page, url, 25000);
+    if (!loaded) continue;
+    await tryDismissCookieBanners(page);
+    await sleep(900);
+
+    const ok = await page.waitForFunction(
+      () => !!document.querySelector('.product-item, .product-grid, [data-product-id], .product-card'),
+      { timeout: 7000 }
+    ).catch(() => null);
+
+    if (ok) break;
+  }
+  if (!loaded) return [];
+
+  const items = await pickCards(page, {
+    cards: '.product-item, .product-card, [data-product-id], .product-grid .grid-tile',
+    name: [
+      '.product-title, .name, .pdp-link, a[title]',
+      'h3, h2'
+    ],
+    price: [
+      '.price, .product-sales-price, .best-price, .value',
+      '[data-price]'
+    ],
+    link: ['a[href]']
+  });
+
+  const mapped = items.map(x => {
+    const title = normalize(x.name);
+    const price = parsePrice(x.price);
+    if (!Number.isFinite(price) || !title) return null;
+    return { title, price, url: x.link || page.url(), source: sourceId };
+  }).filter(Boolean);
+
+  return mapped;
 }
