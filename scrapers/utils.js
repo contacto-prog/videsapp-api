@@ -111,48 +111,115 @@ export async function autoScroll(page, { steps = 10, delay = 300 } = {}) {
   } catch {}
 }
 
-// VTEX: intenta varias rutas y devuelve [{title, price, url}]
+/* === VTEX helpers === */
+
+// Intenta leer precios desde window.__STATE__ (muy común en VTEX)
+async function tryVtexState(page) {
+  try {
+    const state = await page.evaluate(() => {
+      // algunos sitios lo exponen en window.__STATE__ o en un script con id/state
+      // devolvemos un objeto simplificado para parsearlo acá afuera
+      const w = window;
+      if (w && w.__STATE__) return JSON.stringify(w.__STATE__);
+      // fallback: busca <script> con __STATE__ en texto
+      const scripts = Array.from(document.querySelectorAll('script'));
+      for (const s of scripts) {
+        const t = s.textContent || '';
+        if (t.includes('__STATE__')) return t;
+      }
+      return null;
+    });
+    if (!state) return [];
+
+    const text = String(state);
+    // Heurística: busca bloques con commertialOffer y Price
+    const items = [];
+    const re = /"commertialOffer"\s*:\s*\{[^}]*"Price"\s*:\s*([0-9.]+)[^}]*\}[^}]*\}\s*,\s*"name"\s*:\s*"([^"]+)"/gi;
+    let m;
+    while ((m = re.exec(text))) {
+      const price = Math.round(Number(m[1]));
+      const title = m[2];
+      if (title && Number.isFinite(price)) {
+        items.push({ title, price, url: null });
+      }
+      if (items.length >= 20) break;
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+// VTEX: prueba varias rutas + paginación y devuelve [{title, price, url}]
 export async function tryVtexSearch(page, product, mapItem = (p) => p) {
   try {
     const q = String(product || '').trim();
     if (!q) return [];
-    const urls = [
+
+    const bases = [
       `/api/catalog_system/pub/products/search/${encodeURIComponent(q)}`,
-      `/api/catalog_system/pub/products/search/?ft=${encodeURIComponent(q)}&_from=0&_to=20`
+      `/api/catalog_system/pub/products/search/?ft=${encodeURIComponent(q)}`,
+      `/api/catalog_system/pub/products/search/?fq=ft:${encodeURIComponent(q)}`
     ];
-    const data = await page.evaluate(async (urlList) => {
-      for (const u of urlList) {
+
+    // intentamos varias ventanas de paginación
+    const windows = [
+      { from: 0, to: 19 },
+      { from: 0, to: 40 },
+      { from: 0, to: 60 }
+    ];
+
+    const data = await page.evaluate(async (bases_, windows_) => {
+      const tryFetch = async (url) => {
         try {
-          const r = await fetch(u, { credentials: 'include' });
-          if (!r.ok) continue;
+          const r = await fetch(url, { credentials: 'include' });
+          if (!r.ok) return null;
           const j = await r.json();
           if (Array.isArray(j) && j.length) return j;
-        } catch {}
+          return null;
+        } catch { return null; }
+      };
+
+      // 1) rutas sin paginación
+      for (const b of bases_) {
+        const j = await tryFetch(b);
+        if (j) return j;
+      }
+      // 2) rutas con paginación
+      for (const b of bases_) {
+        for (const w of windows_) {
+          const url = b.includes('?') ? `${b}&_from=${w.from}&_to=${w.to}` : `${b}?_from=${w.from}&_to=${w.to}`;
+          const j = await tryFetch(url);
+          if (j) return j;
+        }
       }
       return null;
-    }, urls);
+    }, bases, windows);
 
-    if (!Array.isArray(data) || !data.length) return [];
-
-    const out = [];
-    for (const p of data) {
-      const name = p?.productName || p?.productTitle || p?.productReference || '';
-      const sku = p?.items?.[0];
-      const seller = sku?.sellers?.[0];
-      const price = seller?.commertialOffer?.Price ?? seller?.commertialOffer?.price ?? null;
-      let link = null;
-      if (p?.link) link = p.link;
-      else if (p?.linkText) link = `/${p.linkText}/p`;
-
-      if (name && Number.isFinite(price)) {
-        out.push(mapItem({
-          title: name,
-          price: Math.round(price),
-          url: link || null,
-        }));
+    if (Array.isArray(data) && data.length) {
+      const out = [];
+      for (const p of data) {
+        const name = p?.productName || p?.productTitle || p?.productReference || '';
+        const sku = p?.items?.[0];
+        const seller = sku?.sellers?.[0];
+        const price = seller?.commertialOffer?.Price ?? seller?.commertialOffer?.price ?? null;
+        let link = null;
+        if (p?.link) link = p.link;
+        else if (p?.linkText) link = `/${p.linkText}/p`;
+        if (name && Number.isFinite(price)) {
+          out.push(mapItem({ title: name, price: Math.round(price), url: link || null }));
+        }
       }
+      if (out.length) return out;
     }
-    return out;
+
+    // 3) último intento: __STATE__ de VTEX en la página
+    const stateItems = await tryVtexState(page);
+    if (stateItems.length) {
+      return stateItems.map(mapItem);
+    }
+
+    return [];
   } catch {
     return [];
   }
