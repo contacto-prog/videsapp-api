@@ -1,5 +1,7 @@
+// scrapers/drsimi.js
 import {
-  sleep, tryDismissCookieBanners, safeGoto, autoScroll, pickCards, normalize, parsePrice,
+  sleep, tryDismissCookieBanners, safeGoto, autoScroll,
+  pickCards, normalize, parsePrice
 } from './utils.js';
 
 export const sourceId = 'drsimi';
@@ -18,8 +20,8 @@ export async function fetchDrsimi(page, product) {
     loaded = await safeGoto(page, url, 20000);
     if (!loaded) continue;
     await tryDismissCookieBanners(page);
-    await sleep(200);
-    await autoScroll(page, { steps: 12, delay: 220 });
+    await sleep(300);
+    await autoScroll(page, { steps: 18, delay: 250 });
     const ok = await page.$('.product-item, .product-grid, [data-product-id], .product-card');
     if (ok) break;
   }
