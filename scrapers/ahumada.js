@@ -8,15 +8,18 @@ export const sourceId = 'ahumada';
 
 export async function fetchAhumada(page, product) {
   const q = encodeURIComponent(product);
+
+  // 👇 Dominio correcto para Chile (VTEX): www.farmaciasahumada.cl
   const candidates = [
-    `https://www.ahumada.cl/search?q=${q}`,
-    `https://www.ahumada.cl/s?q=${q}`,
-    `https://www.ahumada.cl/search?text=${q}`,
+    `https://www.farmaciasahumada.cl/search?q=${q}`,
+    `https://www.farmaciasahumada.cl/s?q=${q}`,
+    `https://www.farmaciasahumada.cl/search?text=${q}`,
   ];
 
   await page.setViewport({ width: 1280, height: 900 });
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36');
 
+  // 1) Ir a la tienda (mismo origen) y probar VTEX primero (rápido)
   let loaded = false;
   for (const url of candidates) {
     loaded = await safeGoto(page, url, 20000);
@@ -32,6 +35,7 @@ export async function fetchAhumada(page, product) {
   }));
   if (apiItems.length) return apiItems;
 
+  // 2) Fallback DOM (por si la API no devuelve nada)
   await tryDismissCookieBanners(page);
   await autoScroll(page, { steps: 18, delay: 250 });
 
