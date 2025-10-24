@@ -1,11 +1,5 @@
-// scrapers/ahumada.js
 import {
-  sleep,
-  tryDismissCookieBanners,
-  safeGoto,
-  pickCards,
-  normalize,
-  parsePrice,
+  sleep, tryDismissCookieBanners, safeGoto, pickCards, normalize, parsePrice,
 } from './utils.js';
 
 export const sourceId = 'ahumada';
@@ -17,7 +11,6 @@ export async function fetchAhumada(page, product) {
     `https://www.ahumada.cl/s?q=${q}`,
     `https://www.ahumada.cl/search?text=${q}`,
   ];
-
   await page.setViewport({ width: 1280, height: 900 });
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36');
 
@@ -27,15 +20,12 @@ export async function fetchAhumada(page, product) {
     if (!loaded) continue;
     await tryDismissCookieBanners(page);
     await sleep(1000);
-
     const ok = await page.waitForFunction(
       () => !!document.querySelector('.vtex-product-summary-2-x-container, .product-item, [data-testid*="product"], [data-sku], [data-sku-id]'),
       { timeout: 7000 }
     ).catch(() => null);
-
     if (ok) break;
   }
-
   if (!loaded) return [];
 
   const items = await pickCards(page, {
@@ -45,7 +35,7 @@ export async function fetchAhumada(page, product) {
       '.vtex-product-summary-2-x-productName',
       '.product-item .name',
       '[data-testid*="name"]',
-      'h3 a', 'h3', 'a[title]'
+      'h3 a', 'h3', 'a[title]',
     ],
     price: [
       '.vtex-product-price-1-x-sellingPriceValue',
@@ -56,9 +46,9 @@ export async function fetchAhumada(page, product) {
       '[data-price]',
       'span[class*="price"]',
       '.best-price',
-      '.price, .fa-price, .price__current'
+      '.price, .fa-price, .price__current',
     ],
-    link: ['a[href]']
+    link: ['a[href]'],
   });
 
   const mapped = items.map(x => {
