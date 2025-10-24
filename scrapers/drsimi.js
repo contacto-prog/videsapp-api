@@ -1,43 +1,31 @@
 // scrapers/drsimi.js
-import {
-  sleep, tryDismissCookieBanners, safeGoto, autoScroll,
-  pickCards, normalize, parsePrice
-} from './utils.js';
+import * as cheerio from 'cheerio';
 
-export const sourceId = 'drsimi';
+export function parseDrSimi(html, url){
+  const $ = cheerio.load(html);
+  const text = $('body').text().replace(/\s+/g,' ').trim();
 
-export async function fetchDrsimi(page, product) {
-  const q = encodeURIComponent(product);
-  const candidates = [
-    `https://www.drsimi.cl/search?q=${q}`,
-    `https://www.drsimi.cl/s?q=${q}`,
-  ];
+  const name = $('h1').first().text().trim() || (text.match(/Paracetamol.*?(Comprimidos|Tabletas)/i)?.[0] ?? '');
+  const anyPrice = text.match(/\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
+  const availability = /Agregar al carro|Añadir al carro|Disponible/i.test(text)
+    ? 'in_stock'
+    : (/Agotado|Sin stock|No disponible/i.test(text) ? 'out_of_stock' : 'unknown');
 
-  await page.setViewport({ width: 1280, height: 900 });
+  const strength = (text.match(/(\d+)\s*mg/i)?.[1]) || null;
+  const pack = (text.match(/(?:x|por)\s*(\d+)\s*(Comprimidos?|Tabletas?)/i)?.[1]) || null;
+  const form = (text.match(/\d+\s*(Comprimidos?|Tabletas?)/i)?.[1]) || null;
 
-  let loaded = false;
-  for (const url of candidates) {
-    loaded = await safeGoto(page, url, 20000);
-    if (!loaded) continue;
-    await tryDismissCookieBanners(page);
-    await sleep(300);
-    await autoScroll(page, { steps: 18, delay: 250 });
-    const ok = await page.$('.product-item, .product-grid, [data-product-id], .product-card');
-    if (ok) break;
-  }
-  if (!loaded) return [];
+  const toNumber = (s)=> s ? Number(s.replace(/\./g,'').replace(',','.')) : undefined;
 
-  const items = await pickCards(page, {
-    cards: '.product-item, .product-card, [data-product-id], .product-grid .grid-tile',
-    name: ['.product-title, .name, .pdp-link, a[title]', 'h3, h2'],
-    price: ['.price, .product-sales-price, .best-price, .value', '[data-price]'],
-    link: ['a[href]'],
-  });
-
-  return items.map(x => {
-    const title = normalize(x.name);
-    const price = parsePrice(x.price);
-    if (!Number.isFinite(price) || !title) return null;
-    return { title, price, url: x.link || page.url(), source: sourceId };
-  }).filter(Boolean);
+  return {
+    source: 'drsimi',
+    url,
+    name,
+    active: 'Paracetamol',
+    strength_mg: strength ? Number(strength) : undefined,
+    form,
+    pack,
+    price: anyPrice ? toNumber(anyPrice[0].replace('$','')) : undefined,
+    availability,
+  };
 }
