@@ -144,4 +144,4 @@ export async function scrapePrices(product) {
 
   setCache(key, result);
   return result;
-}
+} // <- ESTA LLAVE FALTABA
