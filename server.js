@@ -1,4 +1,3 @@
-// server.js
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
@@ -51,12 +50,10 @@ function avg(nums) {
 }
 
 async function launchBrowser() {
-  // En Render: --no-sandbox necesario
-  const browser = await puppeteer.launch({
+  return puppeteer.launch({
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
-  return browser;
 }
 
 async function runWithConcurrency(items, limit, fn) {
@@ -90,11 +87,26 @@ app.get('/prices', async (req, res) => {
     try {
       const results = await runWithConcurrency(SOURCES, CONCURRENCY, async (src) => {
         const t0 = Date.now();
+        let page;
         try {
-          const items = await withTimeout(
-            () => src.run(await browser.newPage(), product),
-            PER_SOURCE_TIMEOUT
-          );
+          page = await browser.newPage();
+
+          // Bloqueo de recursos pesados y trackers (acelera bastante)
+          try {
+            await page.setRequestInterception(true);
+            page.on('request', (reqq) => {
+              const type = reqq.resourceType();
+              if (type === 'image' || type === 'media' || type === 'font') return reqq.abort();
+              const u = reqq.url();
+              if (/googletagmanager|google-analytics|doubleclick|facebook|hotjar|optimizely|segment/i.test(u)) {
+                return reqq.abort();
+              }
+              reqq.continue();
+            });
+          } catch {}
+
+          const items = await withTimeout(() => src.run(page, product), PER_SOURCE_TIMEOUT);
+
           const mapped = (items || []).map((it) => ({
             title: it.title,
             price: it.price,
@@ -119,11 +131,18 @@ app.get('/prices', async (req, res) => {
             tookMs: Date.now() - t0,
             items: [],
           };
+        } finally {
+          try { if (page) await page.close(); } catch {}
         }
       });
 
       const allPrices = results.flatMap((r) => r.items.map((x) => x.price));
       const overall = avg(allPrices);
+
+      // No-cache headers
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
 
       res.json({
         ok: true,
@@ -142,6 +161,14 @@ app.get('/prices', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`API listening on ${PORT}`);
 });
+
+async function shutdown() {
+  console.log('Shutting down...');
+  try { server.close(); } catch {}
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
