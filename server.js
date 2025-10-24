@@ -1,3 +1,4 @@
+// server.js
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
@@ -11,6 +12,7 @@ import { sourceId as drsimiId, fetchDrsimi } from './scrapers/drsimi.js';
 import { sourceId as salcoId, fetchSalcobrand } from './scrapers/salcobrand.js';
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(compression());
 app.use(morgan('tiny'));
@@ -28,6 +30,12 @@ const SOURCES = [
   { id: salcoId, run: fetchSalcobrand },
 ];
 
+/* ---------- Root OK (evita 502/404 en /) ---------- */
+app.get('/', (_req, res) => {
+  res.type('text/plain').send('VIDESAPP API – OK. Use /health or /prices?product=paracetamol');
+});
+
+/* ---------- Healthcheck ---------- */
 app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
@@ -38,6 +46,7 @@ app.get('/health', async (_req, res) => {
   });
 });
 
+/* ---------- Helpers ---------- */
 function withTimeout(promiseFactory, ms) {
   const t = new Promise((_, rej) => setTimeout(() => rej(new Error('source_timeout')), ms));
   return Promise.race([promiseFactory(), t]);
@@ -71,6 +80,7 @@ async function runWithConcurrency(items, limit, fn) {
   return out;
 }
 
+/* ---------- Endpoint principal ---------- */
 app.get('/prices', async (req, res) => {
   try {
     if (!ENABLE_SCRAPER) {
@@ -91,7 +101,7 @@ app.get('/prices', async (req, res) => {
         try {
           page = await browser.newPage();
 
-          // Bloqueo de recursos pesados y trackers (acelera bastante)
+          // Bloqueo de recursos pesados/trackers para acelerar
           try {
             await page.setRequestInterception(true);
             page.on('request', (reqq) => {
@@ -161,6 +171,12 @@ app.get('/prices', async (req, res) => {
   }
 });
 
+/* ---------- 404 JSON fallback ---------- */
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: 'not_found', path: req.path });
+});
+
+/* ---------- Start & graceful shutdown ---------- */
 const server = app.listen(PORT, () => {
   console.log(`API listening on ${PORT}`);
 });
