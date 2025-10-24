@@ -1,5 +1,5 @@
 import {
-  sleep, tryDismissCookieBanners, safeGoto, pickCards, normalize, parsePrice,
+  sleep, tryDismissCookieBanners, safeGoto, autoScroll, pickCards, normalize, parsePrice, tryVtexSearch,
 } from './utils.js';
 
 export const sourceId = 'cruzverde';
@@ -9,20 +9,27 @@ export async function fetchCruzVerde(page, product) {
   const url = `https://www.cruzverde.cl/search?q=${q}`;
 
   await page.setViewport({ width: 1280, height: 900 });
-  await safeGoto(page, url, 25000);
+  await safeGoto(page, url, 20000);
   await tryDismissCookieBanners(page, ['#onetrust-accept-btn-handler', 'button:has-text("Aceptar")']);
-  await sleep(1000);
-  await page.waitForFunction(
-    () => !!document.querySelector('.product, .search-results, .product-grid, [data-product-id]'),
-    { timeout: 8000 }
-  ).catch(() => null);
+  await sleep(300);
+  await autoScroll(page, { steps: 12, delay: 220 });
 
-  const items = await pickCards(page, {
-    cards: '.product, .product-grid .product-tile, [data-product-id], li.grid-tile, .product-card',
-    name: [' .pdp-link, .product-name, .name, .product-title, a[title]', 'h3, h2'],
+  let items = await pickCards(page, {
+    cards: '.product, .product-card, .product-grid .product-tile, [data-product-id], li.grid-tile',
+    name: ['.pdp-link, .product-name, .name, .product-title, a[title]', 'h3, h2'],
     price: ['.product-sales-price, .sales, .price, .value, .best-price', '[data-price], .js-price, .prod__price'],
     link: ['a[href]'],
   });
+
+  if (!items.length) {
+    const apiItems = await tryVtexSearch(page, product, (p) => ({
+      title: p.title,
+      price: p.price,
+      url: p.url ? new URL(p.url, page.url()).href : page.url(),
+      source: sourceId,
+    }));
+    if (apiItems.length) return apiItems;
+  }
 
   return items.map(x => {
     const title = normalize(x.name);
