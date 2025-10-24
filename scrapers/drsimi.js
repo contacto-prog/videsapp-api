@@ -1,5 +1,5 @@
 import {
-  sleep, tryDismissCookieBanners, safeGoto, pickCards, normalize, parsePrice,
+  sleep, tryDismissCookieBanners, safeGoto, autoScroll, pickCards, normalize, parsePrice,
 } from './utils.js';
 
 export const sourceId = 'drsimi';
@@ -15,14 +15,12 @@ export async function fetchDrsimi(page, product) {
 
   let loaded = false;
   for (const url of candidates) {
-    loaded = await safeGoto(page, url, 25000);
+    loaded = await safeGoto(page, url, 20000);
     if (!loaded) continue;
     await tryDismissCookieBanners(page);
-    await sleep(900);
-    const ok = await page.waitForFunction(
-      () => !!document.querySelector('.product-item, .product-grid, [data-product-id], .product-card'),
-      { timeout: 7000 }
-    ).catch(() => null);
+    await sleep(200);
+    await autoScroll(page, { steps: 12, delay: 220 });
+    const ok = await page.$('.product-item, .product-grid, [data-product-id], .product-card');
     if (ok) break;
   }
   if (!loaded) return [];
@@ -41,4 +39,3 @@ export async function fetchDrsimi(page, product) {
     return { title, price, url: x.link || page.url(), source: sourceId };
   }).filter(Boolean);
 }
-
