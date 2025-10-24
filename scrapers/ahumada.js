@@ -1,5 +1,7 @@
+// scrapers/ahumada.js
 import {
-  sleep, tryDismissCookieBanners, safeGoto, autoScroll, pickCards, normalize, parsePrice, tryVtexSearch,
+  sleep, tryDismissCookieBanners, safeGoto, autoScroll,
+  pickCards, normalize, parsePrice, tryVtexSearch
 } from './utils.js';
 
 export const sourceId = 'ahumada';
@@ -18,15 +20,22 @@ export async function fetchAhumada(page, product) {
   let loaded = false;
   for (const url of candidates) {
     loaded = await safeGoto(page, url, 20000);
-    if (!loaded) continue;
-    await tryDismissCookieBanners(page);
-    await autoScroll(page, { steps: 12, delay: 220 });
-    const ok = await page.$('.vtex-product-summary-2-x-container, .product-item, [data-testid*="product"], [data-sku], [data-sku-id]');
-    if (ok) break;
+    if (loaded) break;
   }
   if (!loaded) return [];
 
-  let items = await pickCards(page, {
+  const apiItems = await tryVtexSearch(page, product, (p) => ({
+    title: p.title,
+    price: p.price,
+    url: p.url ? new URL(p.url, page.url()).href : page.url(),
+    source: sourceId,
+  }));
+  if (apiItems.length) return apiItems;
+
+  await tryDismissCookieBanners(page);
+  await autoScroll(page, { steps: 18, delay: 250 });
+
+  const items = await pickCards(page, {
     cards: '.vtex-product-summary-2-x-container, .product-item, [data-testid*="product"], [data-sku], [data-sku-id]',
     name: [
       '.vtex-product-summary-2-x-productBrand',
@@ -48,17 +57,6 @@ export async function fetchAhumada(page, product) {
     ],
     link: ['a[href]'],
   });
-
-  if (!items.length) {
-    // Fallback VTEX API
-    const apiItems = await tryVtexSearch(page, product, (p) => ({
-      title: p.title,
-      price: p.price,
-      url: p.url ? new URL(p.url, page.url()).href : page.url(),
-      source: sourceId,
-    }));
-    if (apiItems.length) return apiItems;
-  }
 
   return items.map(x => {
     const title = normalize(x.name);
