@@ -1,279 +1,132 @@
-// scrapers/searchFederated.js – buscador federado top-1 por farmacia (mejorado)
-// Entra a la PÁGINA DE PRODUCTO para extraer título y precio reales.
-import * as cheerio from 'cheerio';
-import puppeteer from 'puppeteer';
+// scrapers/searchFederated.js (REEMPLAZA TODO EL ARCHIVO)
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const TTL_MS = 1000 * 60 * 10; // 10 minutos
-const CACHE = new Map();
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127 Safari/537.36';
+// Importa los scrapers por tienda (usa los que ya tienes en /scrapers)
+import { searchAhumada } from "./ahumada.js";
+import { searchDrSimi } from "./drsimi.js";
+import { searchCruzVerde } from "./cruzverde.js";      // usa Puppeteer internamente (tu archivo)
+import { searchSalcobrand } from "./salcobrand.js";    // fetch/puppeteer según tu implementación
+import { searchFarmaexpress } from "./farmaexpress.js";// usa Puppeteer (farmex.cl)
 
-const priceRx = /\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})?/;
-const toPrice = (s)=> s ? Number(s.replace(/\$/g,'').replace(/\./g,'').replace(',','.')) : undefined;
-const looksLikeCategory = (s)=> /medicamentos|productos|categor[ií]a|resultados/i.test(s||'');
+// -------------------- Utilidades --------------------
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const STORES_FILE = path.join(__dirname, "..", "data", "stores.json");
 
-// Cache helpers
-function setCache(k, v){ CACHE.set(k, {v, t: Date.now()}); }
-function getCache(k){ const e = CACHE.get(k); if(!e) return null; if(Date.now()-e.t>TTL_MS){CACHE.delete(k); return null;} return e.v; }
-function withTimeout(p, ms){ return new Promise((res,rej)=>{ const t=setTimeout(()=>rej(new Error(`timeout_${ms}ms`)),ms); p.then(x=>{clearTimeout(t);res(x)},e=>{clearTimeout(t);rej(e)}); }); }
-
-// Networking helpers (sin navegador)
-async function getText(url){
-  const r = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Language':'es-CL,es;q=0.9' }});
-  if(!r.ok) throw new Error(`HTTP ${r.status}`);
-  return await r.text();
+// Haversine: distancia en km
+function distanceKm(a, b) {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLng = (b.lng - a.lng) * Math.PI / 180;
+  const la1 = a.lat * Math.PI / 180;
+  const la2 = b.lat * Math.PI / 180;
+  const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-// Normalización
-function norm({source,url,name,price,availability}){
-  return {
-    source,
-    url,
-    name: (name||'').replace(/\s+/g,' ').trim().slice(0,160),
-    price: typeof price==='number' && Number.isFinite(price) ? price : undefined,
-    availability: availability || 'unknown'
-  };
-}
+function nearestBranch(storeName, userLat, userLng) {
+  if (!Number.isFinite(userLat) || !Number.isFinite(userLng)) return null;
+  let branches = [];
+  try {
+    const raw = fs.readFileSync(STORES_FILE, "utf8");
+    const all = JSON.parse(raw);
+    branches = all.filter(x => (x.store || "").toLowerCase() === storeName.toLowerCase());
+  } catch { /* sin sucursales */ }
 
-// Puppeteer sandbox
-async function withBrowser(run){
-  const browser = await puppeteer.launch({
-    headless:'new',
-    args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
-  });
-  try { return await run(browser); }
-  finally { await browser.close().catch(()=>{}); }
-}
-
-// ---------- util: puntaje por coincidencia con la query ----------
-function scoreByQuery(name, q) {
-  const nq = q.toLowerCase();
-  const nn = (name||'').toLowerCase();
-  if (!nn) return 0;
-  let score = 0;
-  if (nn.includes(nq)) score += 3;
-  // tokens básicos (paracetamol, 500, mg, 16, comprimidos)
-  const toks = nq.split(/\s+/).filter(Boolean);
-  for (const t of toks) if (nn.includes(t)) score += 1;
-  return score;
-}
-
-// ---------- Visitar PÁGINA DE PRODUCTO y extraer título/precio ----------
-async function extractFromProductPage(url){
-  const html = await getText(url);
-  const $ = cheerio.load(html);
-  const title = $('h1').first().text().trim() ||
-                $('[itemprop="name"]').first().text().trim() ||
-                $('meta[property="og:title"]').attr('content') ||
-                $('title').text().trim();
-  const blob = $('body').text();
-  const priceTxt =
-    $('[class*="price"], .price, .product__price, [itemprop="price"]').first().text() ||
-    blob.match(priceRx)?.[0] || '';
-  const availability =
-    /Agregar al carro|Añadir al carrito|Disponible/i.test(blob) ? 'in_stock' :
-    (/Agotado|No disponible|Sin stock/i.test(blob) ? 'out_of_stock' : 'unknown');
-  return { title, price: toPrice(priceTxt), availability };
-}
-
-// ---------- Salcobrand (sin navegador) ----------
-async function top1Salcobrand(q){
-  const searchUrl = `https://salcobrand.cl/search?q=${encodeURIComponent(q)}`;
-  const html = await getText(searchUrl);
-  const $ = cheerio.load(html);
-
-  // toma los primeros enlaces a /products/*
-  const candidates = [];
-  $('a').each((_,a)=>{
-    const href = $(a).attr('href')||'';
-    if (!/\/products\//i.test(href) || href.includes('#')) return;
-    const abs = new URL(href, searchUrl).toString();
-    const name = ($(a).text() || $(a).closest('div').text() || '').trim();
-    if (looksLikeCategory(name)) return;
-    candidates.push({ url: abs, name });
-  });
-  // si no hay, nada
-  if (!candidates.length) return [];
-
-  // visita hasta 3 candidatos, elige el que más matchee la query
-  const top = candidates.slice(0,3);
-  const scored = [];
-  for (const c of top) {
-    try {
-      const d = await extractFromProductPage(c.url);
-      scored.push({ ...c, name: d.title || c.name, price: d.price, availability: d.availability,
-        score: scoreByQuery(d.title || c.name, q) });
-    } catch {}
+  if (!branches.length) return null;
+  const me = { lat: userLat, lng: userLng };
+  let best = null;
+  for (const b of branches) {
+    if (!Number.isFinite(b.lat) || !Number.isFinite(b.lng)) continue;
+    const d = distanceKm(me, { lat: b.lat, lng: b.lng });
+    if (!best || d < best.distance_km) best = { ...b, distance_km: Math.round(d * 10) / 10 };
   }
-  if (!scored.length) return [];
-
-  scored.sort((a,b)=> b.score - a.score);
-  const best = scored[0];
-  return [ norm({ source:'salcobrand', url:best.url, name:best.name, price:best.price, availability:best.availability }) ];
+  if (!best) return null;
+  const maps = `https://www.google.com/maps/dir/${userLat},${userLng}/${encodeURIComponent(best.address || `${best.lat},${best.lng}`)}`;
+  return { name: best.name, address: best.address, lat: best.lat, lng: best.lng, distance_km: best.distance_km, maps_url: maps };
 }
 
-// ---------- Dr. Simi (sin navegador) ----------
-async function top1DrSimi(q){
-  const searchUrl = `https://www.drsimi.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`;
-  const html = await getText(searchUrl);
-  const $ = cheerio.load(html);
+// Normaliza un item de cualquier scraper
+function normalizeItem(store, it) {
+  if (!it) return null;
+  const name = (it.name || "").toString().trim();
+  const price = Number(it.price);
+  const url = it.url || null;
+  const available = (typeof it.available === "boolean") ? it.available : true;
+  if (!name || !Number.isFinite(price)) return null;
+  return { store, name, price, currency: it.currency || "CLP", url, available };
+}
 
-  const candidates = [];
-  $('a').each((_,a)=>{
-    const href = $(a).attr('href')||'';
-    if (!(/\/p($|[\/\?])|\/producto|\/product/i.test(href)) || href.includes('#')) return;
-    const abs = new URL(href, searchUrl).toString();
-    const name = ($(a).text() || $(a).closest('li,div').text() || '').trim();
-    if (looksLikeCategory(name)) return;
-    candidates.push({ url: abs, name });
-  });
-  if (!candidates.length) return [];
-
-  const top = candidates.slice(0,3);
-  const scored = [];
-  for (const c of top) {
-    try {
-      const d = await extractFromProductPage(c.url);
-      scored.push({ ...c, name: d.title || c.name, price: d.price, availability: d.availability,
-        score: scoreByQuery(d.title || c.name, q) });
-    } catch {}
+// Corre un scraper con límite y manejo de errores
+async function runStore(label, fn, query, limit, debug) {
+  const result = { store: label, ok: false, items: [], error: null, picked: null, debug: null };
+  try {
+    const items = await fn(query, { limit, debug });
+    const arr = Array.isArray(items?.items) ? items.items : Array.isArray(items) ? items : [];
+    const norm = arr.map(x => normalizeItem(label, x)).filter(Boolean);
+    // elige el más barato disponible
+    const sorted = norm.filter(x => x.available !== false).sort((a, b) => a.price - b.price);
+    result.items = sorted.slice(0, limit);
+    result.picked = sorted[0] || null;
+    result.ok = true;
+    if (debug && items?.debug) result.debug = items.debug;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
   }
-  if (!scored.length) return [];
-  scored.sort((a,b)=> b.score - a.score);
-  const best = scored[0];
-  return [ norm({ source:'drsimi', url:best.url, name:best.name, price:best.price, availability:best.availability }) ];
+  return result;
 }
 
-// ---------- Farmex (Shopify, sin navegador) ----------
-async function top1Farmex(q){
-  const searchUrl = `https://farmex.cl/search?q=${encodeURIComponent(q)}`;
-  const html = await getText(searchUrl);
-  const $ = cheerio.load(html);
-
-  const candidates = [];
-  $('a').each((_,a)=>{
-    const href = $(a).attr('href')||'';
-    if (!/\/products\//i.test(href) || href.includes('#')) return;
-    const abs = new URL(href, searchUrl).toString();
-    const name = ($(a).text() || $(a).closest('div').text() || '').trim();
-    if (looksLikeCategory(name)) return;
-    candidates.push({ url: abs, name });
-  });
-  if (!candidates.length) return [];
-
-  // visita hasta 5, elige el que mejor coincide (evitamos "KYLEENA" para "paracetamol")
-  const top = candidates.slice(0,5);
-  const scored = [];
-  for (const c of top) {
-    try {
-      const d = await extractFromProductPage(c.url);
-      scored.push({ ...c, name: d.title || c.name, price: d.price, availability: d.availability,
-        score: scoreByQuery(d.title || c.name, q) });
-    } catch {}
+// -------------------- Orquestador Principal --------------------
+export async function federatedSearchTop1(query, { limitPerStore = 10, lat = null, lng = null, debug = false } = {}) {
+  if (!query || !query.trim()) {
+    return { ok: false, count: 0, items: [], errors: ["missing_query"] };
   }
-  if (!scored.length) return [];
-  scored.sort((a,b)=> b.score - a.score);
-  const best = scored[0];
-  return [ norm({ source:'farmex', url:best.url, name:best.name, price:best.price, availability:best.availability }) ];
-}
 
-// ---------- Ahumada (con navegador) ----------
-async function top1Ahumada(q){
-  return await withBrowser(async (browser)=>{
-    const page = await browser.newPage();
-    await page.setUserAgent(UA);
-    await page.setExtraHTTPHeaders({ 'Accept-Language':'es-CL,es;q=0.9' });
-
-    const searchUrl = `https://www.farmaciasahumada.cl/search?q=${encodeURIComponent(q)}`;
-    await page.goto(searchUrl, { waitUntil:'networkidle2', timeout:60000 });
-
-    // toma primer enlace de producto
-    const productUrl = await page.evaluate(()=>{
-      for (const a of Array.from(document.querySelectorAll('a'))) {
-        const href = a.getAttribute('href')||'';
-        if (/\/product|\/products|\/medicamento|\/producto/i.test(href) && !href.includes('#')) {
-          try { return new URL(href, location.href).toString(); } catch {}
-        }
-      }
-      return null;
-    });
-    if (!productUrl) return [];
-
-    // entra a la página del producto y extrae
-    await page.goto(productUrl, { waitUntil:'networkidle2', timeout:60000 });
-    const row = await page.evaluate((priceReStr)=>{
-      const priceRe = new RegExp(priceReStr);
-      const pick = (sel)=> document.querySelector(sel)?.textContent?.trim() || null;
-      const title = pick('h1') || pick('[itemprop="name"]') || document.title;
-      const priceTxt =
-        pick('[class*="price"]') || pick('.price') || document.body.innerText.match(priceRe)?.[0] || '';
-      const availability = /Agregar al carro|Añadir al carrito|Disponible/i.test(document.body.innerText)
-        ? 'in_stock'
-        : (/Agotado|No disponible|Sin stock/i.test(document.body.innerText) ? 'out_of_stock' : 'unknown');
-      return { title, priceTxt, availability };
-    }, priceRx.source);
-
-    return [ norm({ source:'ahumada', url:productUrl, name:row.title, price: toPrice(row.priceTxt), availability: row.availability }) ];
-  });
-}
-
-// ---------- Cruz Verde (con navegador) ----------
-async function top1CruzVerde(q){
-  return await withBrowser(async (browser)=>{
-    const page = await browser.newPage();
-    await page.setUserAgent(UA);
-    await page.setExtraHTTPHeaders({ 'Accept-Language':'es-CL,es;q=0.9' });
-
-    const searchUrl = `https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}`;
-    await page.goto(searchUrl, { waitUntil:'networkidle2', timeout:60000 });
-
-    const productUrl = await page.evaluate(()=>{
-      for (const a of Array.from(document.querySelectorAll('a'))) {
-        const href = a.getAttribute('href')||'';
-        if ((/\d+\.html$/i.test(href) || /\/product|\/products|\/producto/i.test(href)) && !href.includes('#')) {
-          try { return new URL(href, location.href).toString(); } catch {}
-        }
-      }
-      return null;
-    });
-    if (!productUrl) return [];
-
-    await page.goto(productUrl, { waitUntil:'networkidle2', timeout:60000 });
-    const row = await page.evaluate((priceReStr)=>{
-      const priceRe = new RegExp(priceReStr);
-      const pick = (sel)=> document.querySelector(sel)?.textContent?.trim() || null;
-      const title = pick('h1') || pick('[itemprop="name"]') || document.title;
-      const priceTxt =
-        pick('[class*="price"]') || pick('.price') || document.body.innerText.match(priceRe)?.[0] || '';
-      const availability = /Agregar al carro|Añadir al carrito|Disponible/i.test(document.body.innerText)
-        ? 'in_stock'
-        : (/Agotado|No disponible|Sin stock/i.test(document.body.innerText) ? 'out_of_stock' : 'unknown');
-      return { title, priceTxt, availability };
-    }, priceRx.source);
-
-    return [ norm({ source:'cruzverde', url:productUrl, name:row.title, price: toPrice(row.priceTxt), availability: row.availability }) ];
-  });
-}
-
-// ---------- Orquestador ----------
-export async function federatedSearchTop1(q){
-  const key = (q||'').trim().toLowerCase();
-  if(!key) throw new Error('q_required');
-
-  const cached = getCache(key);
-  if(cached) return cached;
-
+  // Define el “pool” de tiendas a consultar
   const tasks = [
-    withTimeout(top1Salcobrand(key), 15000).catch(()=>[]),
-    withTimeout(top1DrSimi(key),     15000).catch(()=>[]),
-    withTimeout(top1Farmex(key),     15000).catch(()=>[]),
-    withTimeout(top1Ahumada(key),    20000).catch(()=>[]),
-    withTimeout(top1CruzVerde(key),  20000).catch(()=>[]),
+    runStore("Ahumada",      searchAhumada,     query, limitPerStore, debug),
+    runStore("Cruz Verde",   searchCruzVerde,   query, limitPerStore, debug),
+    runStore("Salcobrand",   searchSalcobrand,  query, limitPerStore, debug),
+    runStore("Dr. Simi",     searchDrSimi,      query, limitPerStore, debug),
+    runStore("Farmaexpress", searchFarmaexpress,query, limitPerStore, debug),
   ];
 
-  const settled = await Promise.allSettled(tasks);
-  const items = settled.flatMap(s => s.status==='fulfilled' ? s.value : []);
+  const results = await Promise.all(tasks);
 
-  const result = { ok:true, q:key, count: items.length, items };
-  setCache(key, result);
-  return result;
+  // Toma “top-1” por tienda (si existe)
+  let picked = results.map(r => r.picked ? { ...r.picked } : null).filter(Boolean);
+
+  // Adjunta sucursal más cercana si hay lat/lng
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    picked = picked.map(p => ({
+      ...p,
+      nearest: nearestBranch(p.store, lat, lng)
+    }));
+  }
+
+  // Orden final por precio ascendente
+  picked.sort((a, b) => a.price - b.price);
+
+  const payload = {
+    ok: true,
+    q: query,
+    count: picked.length,
+    items: picked
+  };
+
+  if (debug) {
+    payload.debug = {
+      perStore: results.map(r => ({
+        store: r.store,
+        ok: r.ok,
+        error: r.error,
+        sample: r.items?.[0] || null,
+        picked: r.picked,
+        extra: r.debug || null
+      }))
+    };
+  }
+
+  return payload;
 }
