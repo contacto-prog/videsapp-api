@@ -1,4 +1,4 @@
-// server.js – VIDESAPP API (Search + Nearby)
+// server.js – VIDESAPP API (Search federado top-1 por farmacia)
 import express from "express";
 import cors from "cors";
 import compression from "compression";
@@ -14,7 +14,7 @@ app.use(morgan("tiny"));
 
 const PORT = process.env.PORT || 8080;
 
-// ----------------- helpers -----------------
+// -------- Helpers para /nearby (opcional en tu app) --------
 function kmBetween(a, b) {
   const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180;
   const sLat1=Math.sin(dLat/2), sLng1=Math.sin(dLng/2);
@@ -25,29 +25,18 @@ function mapsLink(lat,lng,label){
   const q = encodeURIComponent(label || "");
   return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${q}`;
 }
-const BRAND_MAP = { drsimi:'drsimi', salcobrand:'salcobrand', cruzverde:'cruzverde', ahumada:'ahumada', farmex:'farmex' };
-
 async function loadStores() {
   const raw = await fs.readFile(new URL('./data/stores.json', import.meta.url), 'utf-8');
   return JSON.parse(raw);
 }
 
-// ----------------- base -----------------
-app.get("/", (_req, res) => {
-  res.type("text/plain").send("VIDESAPP API – OK");
-});
-
+// -------- Raíz y health --------
+app.get("/", (_req, res) => res.type("text/plain").send("VIDESAPP API – OK"));
 app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "videsapp-api",
-    port: PORT,
-    node: process.version,
-    time: new Date().toISOString(),
-  });
+  res.json({ ok: true, service: "videsapp-api", port: PORT, node: process.version, time: new Date().toISOString() });
 });
 
-// ----------------- /search (top-1 por farmacia) -----------------
+// -------- NUEVO: /search → top-1 por farmacia --------
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -55,12 +44,12 @@ app.get("/search", async (req, res) => {
     const data = await federatedSearchTop1(q);
     res.json(data);
   } catch (err) {
-    res.status(500).json({ ok:false, error: String(err?.message || err) });
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// ----------------- /nearby (lista final para la app) -----------------
-// Uso: /nearby?q=paracetamol&lat=-33.44&lng=-70.63
+// -------- /nearby (precio + sucursal más cercana + "Cómo llegar") --------
+// Uso: /nearby?q=paracetamol&lat=-33.45&lng=-70.65
 app.get("/nearby", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -71,19 +60,13 @@ app.get("/nearby", async (req, res) => {
       return res.status(400).json({ ok:false, error:"lat_lng_required" });
     }
 
-    const [search, stores] = await Promise.all([
-      federatedSearchTop1(q),
-      loadStores()
-    ]);
-
+    const [search, stores] = await Promise.all([federatedSearchTop1(q), loadStores()]);
     const user = { lat, lng };
     const rows = [];
 
     for (const it of (search.items || [])) {
-      const brand = (BRAND_MAP[it.source?.toLowerCase()] || '').toLowerCase();
-      const pool = stores.filter(s => s.brand.toLowerCase() === brand);
+      const pool = stores.filter(s => s.brand.toLowerCase() === (it.source||"").toLowerCase());
       if (!pool.length) continue;
-      // sucursal más cercana
       let best = null, bestKm = Infinity;
       for (const s of pool) {
         const km = kmBetween(user, {lat:s.lat, lng:s.lng});
@@ -101,7 +84,6 @@ app.get("/nearby", async (req, res) => {
       });
     }
 
-    // ordenar por precio si lo hay, luego por distancia
     rows.sort((a,b)=>{
       if (a.price && b.price) return a.price - b.price;
       if (a.price) return -1;
@@ -111,26 +93,14 @@ app.get("/nearby", async (req, res) => {
 
     res.json({ ok:true, q, count: rows.length, items: rows });
   } catch (err) {
-    res.status(500).json({ ok:false, error: String(err?.message || err) });
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
 // 404
-app.use((req, res) => {
-  res.status(404).json({ ok: false, error: "not_found", path: req.path });
-});
+app.use((req, res) => res.status(404).json({ ok:false, error:"not_found", path:req.path }));
 
-const server = app.listen(PORT, () => {
-  console.log(`✅ Server listening on port ${PORT}`);
-});
-
-function shutdown() {
-  try {
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 2000);
-  } catch {
-    process.exit(0);
-  }
-}
+const server = app.listen(PORT, () => console.log(`✅ Server listening on port ${PORT}`));
+function shutdown(){ try { server.close(()=>process.exit(0)); setTimeout(()=>process.exit(0), 2000);} catch { process.exit(0);} }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
