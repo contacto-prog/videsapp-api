@@ -1,0 +1,8 @@
+[
+  { "brand": "drsimi",     "name": "Dr. Simi Ñuñoa",         "address": "Av. Irarrázaval 1234, Ñuñoa",  "lat": -33.4567, "lng": -70.6012 },
+  { "brand": "drsimi",     "name": "Dr. Simi Providencia",   "address": "Av. Providencia 2001, Providencia", "lat": -33.4265, "lng": -70.6151 },
+  { "brand": "salcobrand", "name": "Salcobrand Manuel Montt","address": "Manuel Montt 300, Providencia", "lat": -33.4305, "lng": -70.6178 },
+  { "brand": "cruzverde",  "name": "Cruz Verde Plaza Ñuñoa", "address": "Plaza Ñuñoa, Ñuñoa",            "lat": -33.4560, "lng": -70.5980 },
+  { "brand": "ahumada",    "name": "Ahumada Providencia",    "address": "Av. Providencia 1100, Providencia", "lat": -33.4269, "lng": -70.6160 },
+  { "brand": "farmex",     "name": "Farmex Apoquindo",       "address": "Av. Apoquindo 4500, Las Condes", "lat": -33.4050, "lng": -70.5710 }
+]
