@@ -26,7 +26,10 @@ function norm({source,url,name,price,availability}){
 }
 function withTimeout(p, ms){ return new Promise((res,rej)=>{ const t=setTimeout(()=>rej(new Error(`timeout_${ms}ms`)),ms); p.then(x=>{clearTimeout(t);res(x)},e=>{clearTimeout(t);rej(e)}); }); }
 async function withBrowser(run){
-  const browser = await puppeteer.launch({ headless:'new', args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+  const browser = await puppeteer.launch({
+    headless:'new',
+    args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
+  });
   try { return await run(browser); } finally { await browser.close().catch(()=>{}); }
 }
 
@@ -45,8 +48,8 @@ async function top1Salcobrand(q){
     const card = $(a).closest('div').text();
     const name = ($(a).text()||card||'').trim();
     const priceTxt = (card.match(priceRx)||[])[0]||'';
-    const item = norm({ source:'salcobrand', url:abs, name, price: toPrice(priceTxt), availability: /Agotado|No disponible/i.test(card)?'out_of_stock':'unknown' });
-    best = item; return false; // primer match y salimos
+    best = norm({ source:'salcobrand', url:abs, name, price: toPrice(priceTxt), availability: /Agotado|No disponible/i.test(card)?'out_of_stock':'unknown' });
+    return false; // primer match
   });
   return best ? [best] : [];
 }
@@ -64,13 +67,13 @@ async function top1DrSimi(q){
     const card = $(a).closest('li,div').text();
     const name = ($(a).text()||card||'').trim();
     const priceTxt = (card.match(priceRx)||[])[0]||'';
-    const item = norm({ source:'drsimi', url:abs, name, price: toPrice(priceTxt), availability: /Agotado|No disponible|Sin stock/i.test(card)?'out_of_stock':'unknown' });
-    best = item; return false;
+    best = norm({ source:'drsimi', url:abs, name, price: toPrice(priceTxt), availability: /Agotado|No disponible|Sin stock/i.test(card)?'out_of_stock':'unknown' });
+    return false;
   });
   return best ? [best] : [];
 }
 
-// Farmex (sin navegador, Shopify)
+// Farmex (Shopify sin navegador)
 async function top1Farmex(q){
   const url = `https://farmex.cl/search?q=${encodeURIComponent(q)}`;
   const html = await getText(url);
@@ -83,8 +86,8 @@ async function top1Farmex(q){
     const card = $(a).closest('div').text();
     const name = ($(a).text()||card||'').trim();
     const priceTxt = (card.match(priceRx)||[])[0]||'';
-    const item = norm({ source:'farmex', url:abs, name, price: toPrice(priceTxt), availability: /Agotado|Sin stock/i.test(card)?'out_of_stock':'unknown' });
-    best = item; return false;
+    best = norm({ source:'farmex', url:abs, name, price: toPrice(priceTxt), availability: /Agotado|Sin stock/i.test(card)?'out_of_stock':'unknown' });
+    return false;
   });
   return best ? [best] : [];
 }
