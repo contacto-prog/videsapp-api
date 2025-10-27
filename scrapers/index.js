@@ -1,4 +1,4 @@
-// scrapers/index.js  —  __INDEX_VERSION = v4-per-source-page
+// scrapers/index.js  —  __INDEX_VERSION = v4.1-per-source-page-safe-fallback
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -11,7 +11,7 @@ import { fetchAhumada,    sourceId as ah } from './ahumada.js';
 import { fetchFarmaexpress, sourceId as fe } from './farmaexpress.js';
 import { fetchDrSimi,     sourceId as ds } from './drsimi.js';
 
-export const __INDEX_VERSION = 'v4-per-source-page';
+export const __INDEX_VERSION = 'v4.1-per-source-page-safe-fallback';
 
 // ----------------------------- Paths / flags -----------------------------
 const __filename = fileURLToPath(import.meta.url);
@@ -99,17 +99,26 @@ async function preparePage(page) {
   page.setDefaultTimeout(DEFAULT_NAV_TIMEOUT);
 }
 
+// Dump seguro (evita usar page si el frame principal está “detached” o la page cerrada)
 async function dumpPage(page, sourceId, step) {
   if (!DUMP) return;
-  const dir = path.join(__dirname, '..', '.scrape-dumps', sourceId);
-  fs.mkdirSync(dir, { recursive: true });
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const base = path.join(dir, `${ts}_${step}`);
-  try { await page.screenshot({ path: `${base}.png`, fullPage: true }); } catch {}
-  try { const html = await page.content(); fs.writeFileSync(`${base}.html`, html, 'utf8'); } catch {}
+  try {
+    if (page.isClosed()) return;
+    const mf = page.mainFrame();
+    if (!mf || mf.isDetached?.()) return;
+  } catch { return; }
+
+  try {
+    const dir = path.join(__dirname, '..', '.scrape-dumps', sourceId);
+    fs.mkdirSync(dir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const base = path.join(dir, `${ts}_${step}`);
+    try { await page.screenshot({ path: `${base}.png`, fullPage: true }); } catch {}
+    try { const html = await page.content(); fs.writeFileSync(`${base}.html`, html, 'utf8'); } catch {}
+  } catch { /* noop */ }
 }
 
-// Soporta firmas: (page,q) y (q,{puppeteer})
+// firmas: (page,q) y (q,{puppeteer})
 async function callScraperFlexible(s, page, q) {
   try {
     const maybe = await s.fn(page, q);
@@ -128,28 +137,31 @@ function buildGenericExtractor(sourceId) {
   const cfg = FALLBACK[sourceId]; if (!cfg) return null;
   const { selectors, nameSel, priceSel } = cfg;
   return async function genericExtract(page) {
-    await page.waitForSelector('body', { timeout: 15000 }).catch(()=>{});
-    await page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(()=>{});
+    // Esperas simples, sin networkidle (evita frames detach)
+    await page.waitForSelector('body', { timeout: 20000 }).catch(()=>{});
+    await page.waitForTimeout(800);
 
+    // Click cookies si aparece
     try {
       const cookieBtn = await page.$x("//button[contains(translate(., 'ACEPTAR', 'aceptar'),'acept') or contains(., 'Aceptar') or contains(., 'aceptar')]");
-      if (cookieBtn[0]) await cookieBtn[0].click().catch(()=>{});
-      await page.waitForTimeout(800);
+      if (cookieBtn[0]) { await cookieBtn[0].click().catch(()=>{}); await page.waitForTimeout(600); }
     } catch {}
 
     await dumpPage(page, sourceId, 'generic-pre-scan');
 
+    // Scroll suave
     try {
       await page.evaluate(async () => {
         const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
-        for (let y = 0; y < document.body.scrollHeight; y += 800) { window.scrollTo(0, y); await sleep(250); }
+        for (let y = 0; y < document.body.scrollHeight; y += 700) { window.scrollTo(0, y); await sleep(200); }
         window.scrollTo(0, 0);
       });
-      await page.waitForTimeout(600);
+      await page.waitForTimeout(500);
     } catch {}
 
     await dumpPage(page, sourceId, 'generic-post-scroll');
 
+    // Extrae
     const items = await page.evaluate(({ selectors, nameSel, priceSel, sourceId }) => {
       const norm = (s) => (s || '').replace(/\s+/g,' ').trim();
       const getPrice = (txt) => { if (!txt) return null; const m = txt.replace(/\./g,'').match(/(\$?\s*\d[\d\s]*)/); if (!m) return null; const n = parseInt(m[1].replace(/[^\d]/g,''),10); return Number.isFinite(n) && n>0 ? n : null; };
@@ -164,6 +176,7 @@ function buildGenericExtractor(sourceId) {
       }
       return take;
     }, { selectors, nameSel, priceSel, sourceId });
+
     return items;
   };
 }
@@ -172,15 +185,17 @@ async function runFallbackForSource(browser, sourceId, q) {
   const cfg = FALLBACK[sourceId]; if (!cfg) return [];
   const url = cfg.buildUrl(q);
 
-  // Page propia del fallback
   const page = await browser.newPage();
   try {
     await preparePage(page);
     log(sourceId, 'fallback →', url);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: DEFAULT_NAV_TIMEOUT });
+
+    // Navegación simple y estable
+    await page.goto(url, { waitUntil: 'load', timeout: DEFAULT_NAV_TIMEOUT }).catch(()=>{});
+    await page.waitForSelector('body', { timeout: 20000 }).catch(()=>{});
+    await page.waitForTimeout(800);
+
     await dumpPage(page, sourceId, 'fallback-dom');
-    try { await page.waitForNetworkIdle({ idleTime: 1000, timeout: 10000 }); } catch {}
-    await dumpPage(page, sourceId, 'fallback-networkidle');
 
     const extractor = buildGenericExtractor(sourceId); if (!extractor) return [];
     const rows = await extractor(page);
@@ -188,6 +203,7 @@ async function runFallbackForSource(browser, sourceId, q) {
     if (!rows.length) await dumpPage(page, sourceId, 'fallback-empty');
     return rows;
   } finally {
+    try { await dumpPage(page, sourceId, 'fallback-final'); } catch {}
     await page.close().catch(()=>{});
   }
 }
@@ -199,7 +215,10 @@ export async function scrapePrices(product) {
 
   const browser = await puppeteer.launch({
     headless: HEADFUL ? false : 'new',
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--lang=es-CL,es;q=0.9,en;q=0.8','--disable-blink-features=AutomationControlled','--window-size=1280,900'],
+    args: [
+      '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu',
+      '--lang=es-CL,es;q=0.9,en;q=0.8','--disable-blink-features=AutomationControlled','--window-size=1280,900'
+    ],
   });
 
   const items = [];
@@ -211,7 +230,6 @@ export async function scrapePrices(product) {
       sourcesTried.push(s.id);
       log('>>>> Fuente:', s.id);
 
-      // Page propia del scraper específico
       const page = await browser.newPage();
       try {
         await preparePage(page);
@@ -236,7 +254,7 @@ export async function scrapePrices(product) {
           }
         }
 
-        // 2) Si no trajo nada, fallback genérico (en page distinta)
+        // 2) Fallback genérico (en page distinta) si no trajo nada
         if (!rows || !rows.length) {
           usedFallback = true;
           try {
@@ -274,7 +292,7 @@ export async function scrapePrices(product) {
     items: unique,
     sources: sourcesTried,
     errors,
-    note: 'INDEX v4 per-source-page (firma flexible + fallback)',
+    note: 'INDEX v4.1 per-source-page (safe fallback)',
   };
 
   setCache(key, result);
