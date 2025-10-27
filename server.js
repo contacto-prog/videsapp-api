@@ -1,17 +1,10 @@
-// server.js – VIDESAPP API (Render-ready + /prices)
+// server.js – VIDESAPP API (Search + Nearby)
 import express from "express";
 import cors from "cors";
 import compression from "compression";
 import morgan from "morgan";
-import puppeteer from "puppeteer";
-
-// Agrega el agregador principal de precios
-import { scrapePrices } from "./scrapers/index.js";
-
-// (Opcional) si mantuviste los debug-parsers por URL individual:
-import { fetchCruzVerde } from "./scrapers/cruzverde.js"; // solo si tienes este archivo
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36";
+import fs from "fs/promises";
+import { federatedSearchTop1 } from "./scrapers/searchFederated.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -21,9 +14,25 @@ app.use(morgan("tiny"));
 
 const PORT = process.env.PORT || 8080;
 
-// ---------------------------------------------------------------------
-// Health & root
-// ---------------------------------------------------------------------
+// ----------------- helpers -----------------
+function kmBetween(a, b) {
+  const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180;
+  const sLat1=Math.sin(dLat/2), sLng1=Math.sin(dLng/2);
+  const A=sLat1*sLat1 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*sLng1*sLng1;
+  return 2*R*Math.asin(Math.sqrt(A));
+}
+function mapsLink(lat,lng,label){
+  const q = encodeURIComponent(label || "");
+  return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${q}`;
+}
+const BRAND_MAP = { drsimi:'drsimi', salcobrand:'salcobrand', cruzverde:'cruzverde', ahumada:'ahumada', farmex:'farmex' };
+
+async function loadStores() {
+  const raw = await fs.readFile(new URL('./data/stores.json', import.meta.url), 'utf-8');
+  return JSON.parse(raw);
+}
+
+// ----------------- base -----------------
 app.get("/", (_req, res) => {
   res.type("text/plain").send("VIDESAPP API – OK");
 });
@@ -38,93 +47,75 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// ---------------------------------------------------------------------
-// /prices?q=paracetamol
-// Devuelve: { product, averagePrice, count, items[], sources[], errors[] }
-// ---------------------------------------------------------------------
-app.get("/prices", async (req, res) => {
+// ----------------- /search (top-1 por farmacia) -----------------
+app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
-    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
-
-    // Llama a tu agregador (con caché interna, timeouts y reintentos)
-    const data = await scrapePrices(q);
-
-    return res.json({ ok: true, ...data });
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+    const data = await federatedSearchTop1(q);
+    res.json(data);
   } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
+    res.status(500).json({ ok:false, error: String(err?.message || err) });
   }
 });
 
-// ---------------------------------------------------------------------
-// /debug/scrape?url=...  (útil para probar un link suelto)
-// Usa navegador sólo cuando hace falta (ej: Cruz Verde, Ahumada búsqueda)
-// ---------------------------------------------------------------------
-app.get("/debug/scrape", async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ ok: false, error: "url_required" });
-
-  const needsBrowser =
-    String(url).includes("cruzverde.cl") ||
-    String(url).includes("farmaciasahumada.cl");
-
+// ----------------- /nearby (lista final para la app) -----------------
+// Uso: /nearby?q=paracetamol&lat=-33.44&lng=-70.63
+app.get("/nearby", async (req, res) => {
   try {
-    if (needsBrowser) {
-      const browser = await puppeteer.launch({
-        headless: "new",
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      });
-      const page = await browser.newPage();
-      await page.setUserAgent(UA);
-      await page.setExtraHTTPHeaders({ "Accept-Language": "es-CL,es;q=0.9" });
-
-      let result;
-      if (String(url).includes("cruzverde.cl")) {
-        // requiere navegador por la forma de servir el DOM
-        result = await fetchCruzVerde(page, String(url));
-      } else {
-        // Ahumada (búsqueda): devuelve links de productos
-        await page.goto(String(url), { waitUntil: "networkidle2", timeout: 60000 });
-        const links = await page.evaluate(() => {
-          const out = [];
-          document.querySelectorAll("a").forEach((a) => {
-            const href = a.getAttribute("href") || "";
-            if (
-              /\/product|\/products|\/medicamento|\/producto/i.test(href) &&
-              !href.includes("#")
-            ) {
-              try {
-                out.push(new URL(href, location.href).toString());
-              } catch {}
-            }
-          });
-          return Array.from(new Set(out)).slice(0, 5);
-        });
-        result = { source: "ahumada-search", url: String(url), links };
-      }
-
-      await browser.close();
-      return res.json({ ok: true, result });
+    const q = String(req.query.q || "").trim();
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!q)  return res.status(400).json({ ok:false, error:"q_required" });
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(400).json({ ok:false, error:"lat_lng_required" });
     }
 
-    // Para otros dominios, /prices es el flujo recomendado.
-    return res.status(400).json({
-      ok: false,
-      error: "use_prices_endpoint",
-      hint: "Usa /prices?q=paracetamol para el flujo completo.",
+    const [search, stores] = await Promise.all([
+      federatedSearchTop1(q),
+      loadStores()
+    ]);
+
+    const user = { lat, lng };
+    const rows = [];
+
+    for (const it of (search.items || [])) {
+      const brand = (BRAND_MAP[it.source?.toLowerCase()] || '').toLowerCase();
+      const pool = stores.filter(s => s.brand.toLowerCase() === brand);
+      if (!pool.length) continue;
+      // sucursal más cercana
+      let best = null, bestKm = Infinity;
+      for (const s of pool) {
+        const km = kmBetween(user, {lat:s.lat, lng:s.lng});
+        if (km < bestKm) { bestKm = km; best = s; }
+      }
+      if (!best) continue;
+      rows.push({
+        brand: it.source,
+        name: it.name,
+        price: it.price ?? null,
+        address: best.address,
+        storeName: best.name,
+        distance_km: Math.round(bestKm*10)/10,
+        mapsUrl: mapsLink(best.lat, best.lng, `${best.name} ${best.address}`)
+      });
+    }
+
+    // ordenar por precio si lo hay, luego por distancia
+    rows.sort((a,b)=>{
+      if (a.price && b.price) return a.price - b.price;
+      if (a.price) return -1;
+      if (b.price) return 1;
+      return a.distance_km - b.distance_km;
     });
+
+    res.json({ ok:true, q, count: rows.length, items: rows });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
+    res.status(500).json({ ok:false, error: String(err?.message || err) });
   }
 });
 
-// ---------------------------------------------------------------------
 // 404
-// ---------------------------------------------------------------------
 app.use((req, res) => {
   res.status(404).json({ ok: false, error: "not_found", path: req.path });
 });
