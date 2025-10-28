@@ -1,4 +1,5 @@
 // server.js – VIDESAPP API (Search federado top-1 por farmacia)
+import { searchChainPricesLite } from './scrapers/chainsLite.js';
 import express from "express";
 import cors from "cors";
 import compression from "compression";
@@ -36,7 +37,42 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "videsapp-api", port: PORT, node: process.version, time: new Date().toISOString() });
 });
 
-// -------- NUEVO: /search → top-1 por farmacia --------
+// -------- NUEVO: precios-lite (top-1 por cadena, datos reales) --------
+app.get("/prices-lite", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+
+    const data = await searchChainPricesLite(q, { lat, lng });
+    res.json(data); // { ok, query, count, items:[{chain,price,url,mapsUrl}] }
+  } catch (err) {
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
+  }
+});
+
+// -------- COMPAT: /search2 apunta a precios-lite (para APK existente) --------
+app.get("/search2", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+
+    const data = await searchChainPricesLite(q, { lat, lng });
+    res.json({
+      ok: true,
+      q,
+      count: data.count,
+      items: data.items // [{chain,price,url,mapsUrl}]
+    });
+  } catch (err) {
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
+  }
+});
+
+// -------- /search → top-1 por farmacia (federado original) --------
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
