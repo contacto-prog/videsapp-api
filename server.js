@@ -1,106 +1,99 @@
-// server.js – VIDESAPP API (Search federado top-1 por farmacia)
 import express from "express";
 import cors from "cors";
 import compression from "compression";
 import morgan from "morgan";
-import fs from "fs/promises";
-import { federatedSearchTop1 } from "./scrapers/searchFederated.js";
 
 const app = express();
-app.set("trust proxy", 1);
-app.use(cors());
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
+
 app.use(compression());
-app.use(morgan("tiny"));
+app.use(cors({ origin: "*"}));
+app.use(morgan("dev"));
 
-const PORT = process.env.PORT || 8080;
-
-// -------- Helpers para /nearby (opcional en tu app) --------
-function kmBetween(a, b) {
-  const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180;
-  const sLat1=Math.sin(dLat/2), sLng1=Math.sin(dLng/2);
-  const A=sLat1*sLat1 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*sLng1*sLng1;
-  return 2*R*Math.asin(Math.sqrt(A));
-}
-function mapsLink(lat,lng,label){
-  const q = encodeURIComponent(label || "");
-  return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${q}`;
-}
-async function loadStores() {
-  const raw = await fs.readFile(new URL('./data/stores.json', import.meta.url), 'utf-8');
-  return JSON.parse(raw);
-}
-
-// -------- Raíz y health --------
-app.get("/", (_req, res) => res.type("text/plain").send("VIDESAPP API – OK"));
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "videsapp-api", port: PORT, node: process.version, time: new Date().toISOString() });
+// --------- HEALTH ----------
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "videsapp-api",
+    port: PORT,
+    node: process.version,
+    time: new Date().toISOString(),
+  });
 });
 
-// -------- NUEVO: /search → top-1 por farmacia --------
+// --------- SEARCH ----------
 app.get("/search", async (req, res) => {
   try {
-    const q = String(req.query.q || "").trim();
-    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-    const data = await federatedSearchTop1(q);
-    res.json(data);
+    const q = (req.query.q || "").toString();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    const debug = req.query.debug === "1" || req.query.debug === "true";
+    const limitPerStore = req.query.limit ? Number(req.query.limit) : 10;
+
+    const { federatedSearchTop1 } = await import("./scrapers/searchFederated.js");
+    const out = await federatedSearchTop1(q, { limitPerStore, lat, lng, debug });
+    res.json(out);
   } catch (err) {
-    res.status(500).json({ ok:false, error:String(err?.message || err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-// -------- /nearby (precio + sucursal más cercana + "Cómo llegar") --------
-// Uso: /nearby?q=paracetamol&lat=-33.45&lng=-70.65
-app.get("/nearby", async (req, res) => {
+// --------- SEARCH2 (debug forzado) ----------
+app.get("/search2", async (req, res) => {
   try {
-    const q = String(req.query.q || "").trim();
-    const lat = Number(req.query.lat);
-    const lng = Number(req.query.lng);
-    if (!q)  return res.status(400).json({ ok:false, error:"q_required" });
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      return res.status(400).json({ ok:false, error:"lat_lng_required" });
-    }
+    const q = (req.query.q || "").toString();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    const limitPerStore = req.query.limit ? Number(req.query.limit) : 10;
 
-    const [search, stores] = await Promise.all([federatedSearchTop1(q), loadStores()]);
-    const user = { lat, lng };
-    const rows = [];
-
-    for (const it of (search.items || [])) {
-      const pool = stores.filter(s => s.brand.toLowerCase() === (it.source||"").toLowerCase());
-      if (!pool.length) continue;
-      let best = null, bestKm = Infinity;
-      for (const s of pool) {
-        const km = kmBetween(user, {lat:s.lat, lng:s.lng});
-        if (km < bestKm) { bestKm = km; best = s; }
-      }
-      if (!best) continue;
-      rows.push({
-        brand: it.source,
-        name: it.name,
-        price: it.price ?? null,
-        address: best.address,
-        storeName: best.name,
-        distance_km: Math.round(bestKm*10)/10,
-        mapsUrl: mapsLink(best.lat, best.lng, `${best.name} ${best.address}`)
-      });
-    }
-
-    rows.sort((a,b)=>{
-      if (a.price && b.price) return a.price - b.price;
-      if (a.price) return -1;
-      if (b.price) return 1;
-      return a.distance_km - b.distance_km;
-    });
-
-    res.json({ ok:true, q, count: rows.length, items: rows });
+    const { federatedSearchTop1 } = await import("./scrapers/searchFederated.js");
+    const out = await federatedSearchTop1(q, { limitPerStore, lat, lng, debug: true });
+    res.json(out);
   } catch (err) {
-    res.status(500).json({ ok:false, error:String(err?.message || err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-// 404
-app.use((req, res) => res.status(404).json({ ok:false, error:"not_found", path:req.path }));
+// --------- DIAG: FETCH ----------
+app.get("/diag/fetch", async (req, res) => {
+  const url = req.query.url?.toString();
+  if (!url) return res.status(400).send("Missing url");
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const text = await r.text();
+    res.type("text/plain").send(text.slice(0, 2000));
+  } catch (err) {
+    res.status(500).send(String(err?.message || err));
+  }
+});
 
-const server = app.listen(PORT, () => console.log(`✅ Server listening on port ${PORT}`));
-function shutdown(){ try { server.close(()=>process.exit(0)); setTimeout(()=>process.exit(0), 2000);} catch { process.exit(0);} }
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+// --------- DIAG: PUPPETEER ----------
+app.get("/diag/puppeteer", async (req, res) => {
+  const url = req.query.url?.toString();
+  if (!url) return res.status(400).send("Missing url");
+  try {
+    const puppeteer = await import("puppeteer");
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(1200);
+    const html = await page.content();
+    await browser.close();
+    res.type("text/plain").send(html.slice(0, 2000));
+  } catch (err) {
+    res.status(500).send(String(err?.message || err));
+  }
+});
+
+// --------- 404 ----------
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: "not_found" });
+});
+
+// --------- LISTEN ----------
+app.listen(PORT, () => {
+  console.log(`✅ Server listening on port ${PORT}`);
+});

@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "PUPPETEER_CACHE_DIR=.puppeteer npx puppeteer browsers install chrome"
+    "postinstall": "PUPPETEER_CACHE_DIR=$(pwd)/.puppeteer npx puppeteer install chrome@stable"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
@@ -12,6 +12,7 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "morgan": "^1.10.0",
-    "puppeteer": "^23.8.0"
+    "node-fetch": "^3.3.2",
+    "puppeteer": "^24.15.0"
   }
 }
