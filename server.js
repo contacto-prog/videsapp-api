@@ -1,99 +1,171 @@
+// server.js – VIDESAPP API (prices-lite + diag)
+import { searchChainPricesLite } from './scrapers/chainsLite.js';
 import express from "express";
 import cors from "cors";
 import compression from "compression";
 import morgan from "morgan";
+import fs from "fs/promises";
+import { federatedSearchTop1 } from "./scrapers/searchFederated.js";
+
+const BUILD  = "prices-lite-2025-10-29";
+const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 
 const app = express();
-const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
-
+app.set("trust proxy", 1);
+app.use(cors());
 app.use(compression());
-app.use(cors({ origin: "*"}));
-app.use(morgan("dev"));
+app.use(morgan("tiny"));
+app.use((req,_res,next)=>{ try{ console.log(`[REQ] ${new Date().toISOString()} ${req.method} ${req.url}`);}catch{} next(); });
 
-// --------- HEALTH ----------
-app.get("/health", (req, res) => {
+const PORT = process.env.PORT || 8080;
+
+// -------- Helpers --------
+function kmBetween(a, b) {
+  const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180;
+  const sLat1=Math.sin(dLat/2), sLng1=Math.sin(dLng/2);
+  const A=sLat1*sLat1 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*sLng1*sLng1;
+  return 2*R*Math.asin(Math.sqrt(A));
+}
+function mapsLink(lat,lng,label){
+  const q = encodeURIComponent(label || "");
+  return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${q}`;
+}
+async function loadStores() {
+  const raw = await fs.readFile(new URL('./data/stores.json', import.meta.url), 'utf-8');
+  return JSON.parse(raw);
+}
+const norm = (s) => (s || "")
+  .toLowerCase()
+  .replace(/\./g, "")
+  .replace(/\s+/g, "")
+  .replace(/farmacia(s)?/g, "");
+
+// -------- Raíz y health --------
+app.get("/", (_req, res) => res.type("text/plain").send("VIDESAPP API – OK"));
+app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "videsapp-api",
+    build: BUILD,
+    commit: COMMIT,
     port: PORT,
     node: process.version,
     time: new Date().toISOString(),
+    routes: ["/prices-lite","/prices-lite-ping","/search2","/search","/nearby","/health","/"]
   });
 });
 
-// --------- SEARCH ----------
-app.get("/search", async (req, res) => {
+// -------- Ping de ruta (no scraper): debe responder siempre --------
+app.get("/prices-lite-ping", (_req, res) => {
+  res.json({ ok:true, ping:"prices-lite", build: BUILD });
+});
+
+// -------- precios-lite (top-1 por cadena, rápido) --------
+app.get("/prices-lite", async (req, res) => {
   try {
-    const q = (req.query.q || "").toString();
+    const q = String(req.query.q || "").trim();
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
-    const debug = req.query.debug === "1" || req.query.debug === "true";
-    const limitPerStore = req.query.limit ? Number(req.query.limit) : 10;
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
 
-    const { federatedSearchTop1 } = await import("./scrapers/searchFederated.js");
-    const out = await federatedSearchTop1(q, { limitPerStore, lat, lng, debug });
-    res.json(out);
+    const data = await searchChainPricesLite(q, { lat, lng });
+    res.json(data);
   } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
+    console.error("[/prices-lite] ERROR:", err);
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// --------- SEARCH2 (debug forzado) ----------
+// -------- compat: /search2 → precios-lite --------
 app.get("/search2", async (req, res) => {
   try {
-    const q = (req.query.q || "").toString();
+    const q = String(req.query.q || "").trim();
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
-    const limitPerStore = req.query.limit ? Number(req.query.limit) : 10;
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
 
-    const { federatedSearchTop1 } = await import("./scrapers/searchFederated.js");
-    const out = await federatedSearchTop1(q, { limitPerStore, lat, lng, debug: true });
-    res.json(out);
+    const data = await searchChainPricesLite(q, { lat, lng });
+    res.json({ ok: true, q, count: data.count, items: data.items });
   } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
+    console.error("[/search2] ERROR:", err);
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// --------- DIAG: FETCH ----------
-app.get("/diag/fetch", async (req, res) => {
-  const url = req.query.url?.toString();
-  if (!url) return res.status(400).send("Missing url");
+// -------- /search (federado original, por compat) --------
+app.get("/search", async (req, res) => {
   try {
-    const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    const text = await r.text();
-    res.type("text/plain").send(text.slice(0, 2000));
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+    const data = await federatedSearchTop1(q);
+    res.json(data);
   } catch (err) {
-    res.status(500).send(String(err?.message || err));
+    console.error("[/search] ERROR:", err);
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// --------- DIAG: PUPPETEER ----------
-app.get("/diag/puppeteer", async (req, res) => {
-  const url = req.query.url?.toString();
-  if (!url) return res.status(400).send("Missing url");
+// -------- /nearby (rápido: usa prices-lite + sucursal más cercana) --------
+app.get("/nearby", async (req, res) => {
   try {
-    const puppeteer = await import("puppeteer");
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    const q = String(req.query.q || "").trim();
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!q)  return res.status(400).json({ ok:false, error:"q_required" });
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(400).json({ ok:false, error:"lat_lng_required" });
+    }
+
+    const prices = await searchChainPricesLite(q, { lat, lng });
+    const stores = await loadStores();
+
+    const user = { lat, lng };
+    const rows = [];
+    for (const it of (prices.items || [])) {
+      const chain = it.chain || "";
+      const nc = norm(chain);
+      const pool = stores.filter(s => {
+        const nb = norm(s.brand);
+        return nb.includes(nc) || nc.includes(nb);
+      });
+      if (!pool.length) continue;
+
+      let best = null, bestKm = Infinity;
+      for (const s of pool) {
+        const km = kmBetween(user, { lat: s.lat, lng: s.lng });
+        if (km < bestKm) { bestKm = km; best = s; }
+      }
+      if (!best) continue;
+
+      rows.push({
+        brand: chain,
+        price: it.price ?? null,
+        storeName: best.name,
+        address: best.address,
+        distance_km: Math.round(bestKm * 10) / 10,
+        mapsUrl: mapsLink(best.lat, best.lng, `${best.name} ${best.address}`),
+        productUrl: it.url || null
+      });
+    }
+
+    rows.sort((a,b)=>{
+      if (a.price && b.price) return a.price - b.price;
+      if (a.price) return -1;
+      if (b.price) return 1;
+      return a.distance_km - b.distance_km;
     });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(1200);
-    const html = await page.content();
-    await browser.close();
-    res.type("text/plain").send(html.slice(0, 2000));
+
+    res.json({ ok:true, q, count: rows.length, items: rows });
   } catch (err) {
-    res.status(500).send(String(err?.message || err));
+    console.error("[/nearby] ERROR:", err);
+    res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// --------- 404 ----------
-app.use((req, res) => {
-  res.status(404).json({ ok: false, error: "not_found" });
-});
+// 404
+app.use((req, res) => res.status(404).json({ ok:false, error:"not_found", path:req.path }));
 
-// --------- LISTEN ----------
-app.listen(PORT, () => {
-  console.log(`✅ Server listening on port ${PORT}`);
-});
+const server = app.listen(PORT, () => console.log(`✅ Server listening on port ${PORT}`, {BUILD, COMMIT}));
+function shutdown(){ try { server.close(()=>process.exit(0)); setTimeout(()=>process.exit(0), 2000);} catch { process.exit(0);} }
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
