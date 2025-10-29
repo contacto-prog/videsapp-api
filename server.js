@@ -1,4 +1,4 @@
-// server.js – VIDESAPP API (prices-lite + diag)
+// server.js – VIDESAPP API (prices-lite + diag + timeouts)
 import { searchChainPricesLite } from './scrapers/chainsLite.js';
 import express from "express";
 import cors from "cors";
@@ -7,7 +7,7 @@ import morgan from "morgan";
 import fs from "fs/promises";
 import { federatedSearchTop1 } from "./scrapers/searchFederated.js";
 
-const BUILD  = "prices-lite-2025-10-29";
+const BUILD  = "prices-lite-2025-10-29b";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 
 const app = express();
@@ -15,11 +15,18 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(compression());
 app.use(morgan("tiny"));
-app.use((req,_res,next)=>{ try{ console.log(`[REQ] ${new Date().toISOString()} ${req.method} ${req.url}`);}catch{} next(); });
+
+// timeout de request (15s); evita cuelgues
+app.use((req,res,next)=>{
+  res.setTimeout(15000, ()=> {
+    try{ res.status(504).json({ok:false, error:"gateway_timeout"}); }catch{}
+  });
+  next();
+});
 
 const PORT = process.env.PORT || 8080;
 
-// -------- Helpers --------
+// Helpers
 function kmBetween(a, b) {
   const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180;
   const sLat1=Math.sin(dLat/2), sLng1=Math.sin(dLng/2);
@@ -34,65 +41,48 @@ async function loadStores() {
   const raw = await fs.readFile(new URL('./data/stores.json', import.meta.url), 'utf-8');
   return JSON.parse(raw);
 }
-const norm = (s) => (s || "")
-  .toLowerCase()
-  .replace(/\./g, "")
-  .replace(/\s+/g, "")
-  .replace(/farmacia(s)?/g, "");
+const norm = (s) => (s || "").toLowerCase().replace(/\./g,"").replace(/\s+/g,"").replace(/farmacia(s)?/g,"");
 
-// -------- Raíz y health --------
+// Health
 app.get("/", (_req, res) => res.type("text/plain").send("VIDESAPP API – OK"));
 app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "videsapp-api",
-    build: BUILD,
-    commit: COMMIT,
-    port: PORT,
-    node: process.version,
-    time: new Date().toISOString(),
-    routes: ["/prices-lite","/prices-lite-ping","/search2","/search","/nearby","/health","/"]
-  });
+  res.json({ ok:true, service:"videsapp-api", build:BUILD, commit:COMMIT, port:PORT, node:process.version, time:new Date().toISOString() });
 });
 
-// -------- Ping de ruta (no scraper): debe responder siempre --------
+// Ping simple
 app.get("/prices-lite-ping", (_req, res) => {
-  res.json({ ok:true, ping:"prices-lite", build: BUILD });
+  res.json({ ok:true, ping:"prices-lite", build:BUILD });
 });
 
-// -------- precios-lite (top-1 por cadena, rápido) --------
+// precios-lite
 app.get("/prices-lite", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
     if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-
     const data = await searchChainPricesLite(q, { lat, lng });
     res.json(data);
   } catch (err) {
-    console.error("[/prices-lite] ERROR:", err);
     res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// -------- compat: /search2 → precios-lite --------
+// compat /search2 → precios-lite
 app.get("/search2", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
     if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-
     const data = await searchChainPricesLite(q, { lat, lng });
-    res.json({ ok: true, q, count: data.count, items: data.items });
+    res.json({ ok:true, q, count:data.count, items:data.items });
   } catch (err) {
-    console.error("[/search2] ERROR:", err);
     res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// -------- /search (federado original, por compat) --------
+// federado (por compat; no lo usa nearby)
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -100,12 +90,11 @@ app.get("/search", async (req, res) => {
     const data = await federatedSearchTop1(q);
     res.json(data);
   } catch (err) {
-    console.error("[/search] ERROR:", err);
     res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// -------- /nearby (rápido: usa prices-lite + sucursal más cercana) --------
+// nearby rápido
 app.get("/nearby", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -157,7 +146,6 @@ app.get("/nearby", async (req, res) => {
 
     res.json({ ok:true, q, count: rows.length, items: rows });
   } catch (err) {
-    console.error("[/nearby] ERROR:", err);
     res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
