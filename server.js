@@ -1,4 +1,4 @@
-// server.js – VIDESAPP API (Search federado top-1 por farmacia)
+// server.js – VIDESAPP API (Search federado + precios-lite)
 import { searchChainPricesLite } from './scrapers/chainsLite.js';
 import express from "express";
 import cors from "cors";
@@ -15,7 +15,7 @@ app.use(morgan("tiny"));
 
 const PORT = process.env.PORT || 8080;
 
-// -------- Helpers para /nearby (opcional en tu app) --------
+// -------- Helpers --------
 function kmBetween(a, b) {
   const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLng=(b.lng-a.lng)*Math.PI/180;
   const sLat1=Math.sin(dLat/2), sLng1=Math.sin(dLng/2);
@@ -30,6 +30,11 @@ async function loadStores() {
   const raw = await fs.readFile(new URL('./data/stores.json', import.meta.url), 'utf-8');
   return JSON.parse(raw);
 }
+const norm = (s) => (s || "")
+  .toLowerCase()
+  .replace(/\./g, "")
+  .replace(/\s+/g, "")
+  .replace(/farmacia(s)?/g, "");
 
 // -------- Raíz y health --------
 app.get("/", (_req, res) => res.type("text/plain").send("VIDESAPP API – OK"));
@@ -37,7 +42,7 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "videsapp-api", port: PORT, node: process.version, time: new Date().toISOString() });
 });
 
-// -------- NUEVO: precios-lite (top-1 por cadena, datos reales) --------
+// -------- precios-lite (top-1 por cadena, rápido) --------
 app.get("/prices-lite", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -52,7 +57,7 @@ app.get("/prices-lite", async (req, res) => {
   }
 });
 
-// -------- COMPAT: /search2 apunta a precios-lite (para APK existente) --------
+// -------- compat: /search2 apunta a precios-lite (APK antigua) --------
 app.get("/search2", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -61,18 +66,13 @@ app.get("/search2", async (req, res) => {
     if (!q) return res.status(400).json({ ok:false, error:"q_required" });
 
     const data = await searchChainPricesLite(q, { lat, lng });
-    res.json({
-      ok: true,
-      q,
-      count: data.count,
-      items: data.items // [{chain,price,url,mapsUrl}]
-    });
+    res.json({ ok: true, q, count: data.count, items: data.items });
   } catch (err) {
     res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
 
-// -------- /search → top-1 por farmacia (federado original) --------
+// -------- /search (federado original) --------
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -84,7 +84,7 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// -------- /nearby (precio + sucursal más cercana + "Cómo llegar") --------
+// -------- /nearby (rápido: usa prices-lite + sucursal más cercana) --------
 // Uso: /nearby?q=paracetamol&lat=-33.45&lng=-70.65
 app.get("/nearby", async (req, res) => {
   try {
@@ -96,27 +96,39 @@ app.get("/nearby", async (req, res) => {
       return res.status(400).json({ ok:false, error:"lat_lng_required" });
     }
 
-    const [search, stores] = await Promise.all([federatedSearchTop1(q), loadStores()]);
+    // 1) Precios por cadena (rápido)
+    const prices = await searchChainPricesLite(q, { lat, lng }); // {items:[{chain,price,url,mapsUrl}]}
+
+    // 2) Catastro de sucursales
+    const stores = await loadStores();
+
+    // 3) Para cada cadena con precio, buscar sucursal más cercana
     const user = { lat, lng };
     const rows = [];
-
-    for (const it of (search.items || [])) {
-      const pool = stores.filter(s => s.brand.toLowerCase() === (it.source||"").toLowerCase());
+    for (const it of (prices.items || [])) {
+      const chain = it.chain || "";
+      const nc = norm(chain);
+      const pool = stores.filter(s => {
+        const nb = norm(s.brand);
+        return nb.includes(nc) || nc.includes(nb);
+      });
       if (!pool.length) continue;
+
       let best = null, bestKm = Infinity;
       for (const s of pool) {
-        const km = kmBetween(user, {lat:s.lat, lng:s.lng});
+        const km = kmBetween(user, { lat: s.lat, lng: s.lng });
         if (km < bestKm) { bestKm = km; best = s; }
       }
       if (!best) continue;
+
       rows.push({
-        brand: it.source,
-        name: it.name,
+        brand: chain,
         price: it.price ?? null,
-        address: best.address,
         storeName: best.name,
-        distance_km: Math.round(bestKm*10)/10,
-        mapsUrl: mapsLink(best.lat, best.lng, `${best.name} ${best.address}`)
+        address: best.address,
+        distance_km: Math.round(bestKm * 10) / 10,
+        mapsUrl: mapsLink(best.lat, best.lng, `${best.name} ${best.address}`),
+        productUrl: it.url || null
       });
     }
 
