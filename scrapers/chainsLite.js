@@ -47,7 +47,7 @@ function* windowed(arr, w){
 
 export async function searchChainPricesLite(q,{lat=null,lng=null}={}){
   const start = Date.now();
-  const HARD_LIMIT_MS = 12000; // 12s máx por consulta completa
+  const HARD_LIMIT_MS = 12000;
   const url = `https://r.jina.ai/http://www.google.com/search?q=${encodeURIComponent(q+' precio (site:cruzverde.cl OR site:farmaciasahumada.cl OR site:salcobrand.cl OR site:farmex.cl OR site:drsimi.cl)')}&hl=es-CL&num=30`;
 
   let text = '';
@@ -57,11 +57,9 @@ export async function searchChainPricesLite(q,{lat=null,lng=null}={}){
       headers:{'User-Agent':'Mozilla/5.0','Accept-Language':'es-CL,es;q=0.9,en;q=0.8'}
     });
   }catch(e){
-    // si falla, devolvemos OK vacío rápido
     return { ok:true, query:q, count:0, items:[], note:'timeout_or_fetch_error' };
   }
 
-  // si ya nos pasamos del límite duro, devolvemos vacío
   if(Date.now()-start > HARD_LIMIT_MS){
     return { ok:true, query:q, count:0, items:[], note:'hard_limit_exceeded' };
   }
@@ -82,7 +80,6 @@ export async function searchChainPricesLite(q,{lat=null,lng=null}={}){
     }
   }
 
-  // mínimo por cadena (precio más bajo)
   const byChain=new Map();
   for(const it of items){
     const prev=byChain.get(it.chain);
@@ -94,7 +91,7 @@ export async function searchChainPricesLite(q,{lat=null,lng=null}={}){
     ok:true,
     query:q,
     count:uniq.length,
-    items:uniq.slice(0,8), // no más de 8 para respuesta rápida
+    items:uniq.slice(0,8),
     took_ms: Date.now()-start
   };
 }

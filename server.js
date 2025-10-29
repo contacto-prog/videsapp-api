@@ -15,12 +15,8 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(compression());
 app.use(morgan("tiny"));
-
-// timeout de request (15s); evita cuelgues
 app.use((req,res,next)=>{
-  res.setTimeout(15000, ()=> {
-    try{ res.status(504).json({ok:false, error:"gateway_timeout"}); }catch{}
-  });
+  res.setTimeout(15000, ()=> { try{ res.status(504).json({ok:false, error:"gateway_timeout"}); }catch{} });
   next();
 });
 
@@ -82,7 +78,7 @@ app.get("/search2", async (req, res) => {
   }
 });
 
-// federado (por compat; no lo usa nearby)
+// federado (por compat)
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
