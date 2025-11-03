@@ -5,7 +5,6 @@ import cors from "cors";
 import compression from "compression";
 import morgan from "morgan";
 import fs from "fs/promises";
-import { federatedSearchTop1 } from "./scrapers/searchFederated.js";
 
 const BUILD  = "prices-lite-2025-10-29b";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
@@ -83,6 +82,7 @@ app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+    const { federatedSearchTop1 } = await import("./scrapers/searchFederated.js");
     const data = await federatedSearchTop1(q);
     res.json(data);
   } catch (err) {
