@@ -148,69 +148,41 @@ async function callScraperFlexible(s, page, q) {
   return [];
 }
 
-function buildGenericExtractor(sourceId) {
+
+function buildGenericExtractor(sourceId, q) {
   const cfg = FALLBACK[sourceId]; if (!cfg) return null;
   const { selectors, nameSel, priceSel } = cfg;
+  const qtok = String(q||'').toLowerCase().replace(/[^a-z0-9áéíóúñs]/gi,' ').split(/s+/).filter(Boolean)[0] || '';
   return async function genericExtract(page){
-  try { await page.waitForSelector("body", { timeout: 20000 }).catch(()=>{}); } catch {}
-  await new Promise(r=>setTimeout(r,900));
-  try {
-    const cookieBtn = await page.$x("//button[contains(translate(., 'ACEPTAR','aceptar'),'acept') or contains(., 'Aceptar') or contains(., 'aceptar')]");
-    if (cookieBtn[0]) { await cookieBtn[0].click().catch(()=>{}); await new Promise(r=>setTimeout(r,600)); }
-  } catch {}
-  const items = await page.evaluate(({selectors,nameSel,priceSel,sourceId})=>{
-    const norm = s => (s||"").replace(/\s+/g," ").trim();
-    const priceFrom = txt => {
-      if (!txt) return null;
-      const clean = txt.replace(/\./g,"");
-      const m = clean.match(/\$?\s*(\d[\d\s]{2,})/);
-      if (!m) return null;
-      const n = parseInt(m[1].replace(/[^\d]/g,""),10);
-      return Number.isFinite(n) && n>0 ? n : null;
-    };
-    const nearPrice = el => {
-      const probes = [...el.querySelectorAll(priceSel.join(","))];
-      for (const p of probes) { const v = priceFrom(p.textContent); if (v) return v; }
-      let cur = el, depth = 0;
-      while (cur && depth < 3) {
-        const cand = [...cur.querySelectorAll("[class*=price], .price, .product-price, [data-price]")];
-        for (const p of cand) { const v = priceFrom(p.textContent); if (v) return v; }
-        cur = cur.parentElement; depth++;
+    try { await page.waitForSelector("body",{timeout:20000}).catch(()=>{}); } catch {}
+    await new Promise(r=>setTimeout(r,900));
+    try{ const btn=await page.$x("//button[contains(translate(., 'ACEPTAR','aceptar'),'acept') or contains(., 'Aceptar') or contains(., 'aceptar')]"); if(btn[0]){ await btn[0].click().catch(()=>{}); await new Promise(r=>setTimeout(r,600)); } }catch{}
+    const items = await page.evaluate(({selectors,nameSel,priceSel,sourceId,qtok})=>{
+      const norm=s=>(s||'').replace(/s+/g,' ').trim();
+      const priceFrom=txt=>{ if(!txt)return null; const clean=txt.replace(/./g,''); const m=clean.match(/$?s*(d[ds]{2,})/); if(!m)return null; const n=parseInt(m[1].replace(/[^d]/g,''),10); return Number.isFinite(n)&&n>0?n:null; };
+      const qAll=sel=>{ try{return Array.from(document.querySelectorAll(sel))}catch{return[]} };
+      const blocks=[...new Set([].concat(...selectors.map(qAll)))].slice(0,400);
+      const out=[];
+      const badName=n=>/decreto|normativa|ley|llámanos|tel:|+s?56|600|0800/i.test(n);
+      for(const el of blocks){
+        const nameEl=el.querySelector(nameSel.join(','))||el.closest('article, .product, .product-item, .product-card, .grid-item, li')?.querySelector(nameSel.join(','))||el.querySelector('a[title], a[href]');
+        const linkEl=el.querySelector('a[href]')||nameEl;
+        const name=norm(nameEl?.textContent||'');
+        if(!name) continue;
+        if(qtok && !name.toLowerCase().includes(qtok)) continue;
+        if(badName(name)) continue;
+        let price=null;
+        const probes=[...el.querySelectorAll(priceSel.join(','))];
+        for(const p of probes){ const v=priceFrom(p.textContent); if(v){ price=v; break; } }
+        if(!price){ const txt=norm(el.textContent||''); const m=txt.replace(/./g,'').match(/$?s*(d{3,}(?:sd{3})*)/); if(m){ const n=parseInt(m[1].replace(/[^d]/g,''),10); if(Number.isFinite(n)) price=n; } }
+        const url=(linkEl&&linkEl.href)||'';
+        if(url.startsWith('tel:')) continue;
+        if(price && price>=500 && price<=200000){ out.push({ source:sourceId, name, price, url }); if(out.length>=50) break; }
       }
-      return null;
-    };
-    const qAll = sel => { try { return Array.from(document.querySelectorAll(sel)); } catch { return []; } };
-    const blocks = [...new Set([].concat(...selectors.map(qAll)))];
-    const out = [];
-    for (const el of blocks) {
-      const nameEl = el.querySelector(nameSel.join(",")) ||
-        el.closest("article, .product, .product-item, .product-card, .grid-item, li")?.querySelector(nameSel.join(",")) ||
-        el.querySelector("a[title], a[href]");
-      const linkEl = el.querySelector("a[href]") || nameEl;
-      const name = norm(nameEl?.textContent || "");
-      let price = nearPrice(el);
-      if (!price) {
-        const txt = norm(el.textContent || "");
-        const m = txt.replace(/\./g,"").match(/\$?\s*(\d{3,}(?:\s\d{3})*)/);
-        if (m) { const n = parseInt(m[1].replace(/[^\d]/g,""),10); if (Number.isFinite(n)) price = n; }
-      }
-      const url = linkEl && linkEl.href ? linkEl.href : "";
-      if (name && url && price) out.push({ source: sourceId, name, price, url });
-      if (out.length >= 40) break;
-    }
-    if (!out.length) {
-      const anchors = Array.from(document.querySelectorAll("a[href]"));
-      for (const a of anchors) {
-        const pname = norm(a.textContent || ""); if (!pname) continue;
-        const container = a.closest("li,article,.product,.item,.grid-item");
-        const p = priceFrom(container?.textContent || "");
-        if (p) { out.push({ source: sourceId, name: pname, price: p, url: a.href }); if (out.length >= 40) break; }
-      }
-    }
-    return out;
-  }, {selectors,nameSel,priceSel,sourceId});
-  return items;
-};
+      return out;
+    }, {selectors,nameSel,priceSel,sourceId,qtok});
+    return items;
+  };
 }
 
 async function runFallbackForSource(browser, sourceId, q) {
@@ -229,7 +201,7 @@ async function runFallbackForSource(browser, sourceId, q) {
 
     await dumpPage(page, sourceId, 'fallback-dom');
 
-    const extractor = buildGenericExtractor(sourceId); if (!extractor) return [];
+    const extractor = buildGenericExtractor(sourceId, q); if (!extractor) return [];
     const rows = await extractor(page);
     log(sourceId, 'fallback_items:', Array.isArray(rows) ? rows.length : 0);
     if (!rows.length) await dumpPage(page, sourceId, 'fallback-empty');
