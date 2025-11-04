@@ -1,3 +1,4 @@
+export const sourceId = "cruzverde";
 export async function searchCruzVerde(query, { limit = 10, debug = false, baseUrl = "https://www.cruzverde.cl" } = {}) {
   const puppeteer = await import("puppeteer");
   const browser = await puppeteer.launch({ headless: true }); // en Render: añadir args no-sandbox
