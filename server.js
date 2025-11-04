@@ -153,3 +153,5 @@ const server = app.listen(PORT, () => console.log(`✅ Server listening on port 
 function shutdown(){ try { server.close(()=>process.exit(0)); setTimeout(()=>process.exit(0), 2000);} catch { process.exit(0);} }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+
+app.get("/api/prices", async (req,res)=>{ try{ const { q, lat, lng } = req.query; const { federatedSearchTop1 } = await import("./scrapers/searchFederated.js"); const r = await federatedSearchTop1({ name:String(q||"").trim(), lat: parseFloat(lat), lng: parseFloat(lng) }); res.json({ ok:true, items:r }); }catch(e){ res.status(500).json({ ok:false, error: String(e&&e.message||e) }); } });
