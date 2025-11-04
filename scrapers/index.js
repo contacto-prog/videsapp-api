@@ -159,7 +159,7 @@ function buildGenericExtractor(sourceId, q) {
     try{ const btn=await page.$x("//button[contains(translate(., 'ACEPTAR','aceptar'),'acept') or contains(., 'Aceptar') or contains(., 'aceptar')]"); if(btn[0]){ await btn[0].click().catch(()=>{}); await new Promise(r=>setTimeout(r,600)); } }catch{}
     const items = await page.evaluate(({selectors,nameSel,priceSel,sourceId,qtok})=>{
       const norm=s=>(s||'').replace(/s+/g,' ').trim();
-      const priceFrom=txt=>{ if(!txt)return null; const clean=txt.replace(/./g,''); const m=clean.match(/$?s*(d[ds]{2,})/); if(!m)return null; const n=parseInt(m[1].replace(/[^d]/g,''),10); return Number.isFinite(n)&&n>0?n:null; };
+      const priceFrom=txt=>{ if(!txt)return null; const clean=txt.replace(/./g,''); const m=clean.match(/\$?\s*(\d[\d\s]{2,})/); if(!m)return null; const n=parseInt(m[1].replace(/[^d]/g,''),10); return Number.isFinite(n)&&n>0?n:null; };
       const qAll=sel=>{ try{return Array.from(document.querySelectorAll(sel))}catch{return[]} };
       const blocks=[...new Set([].concat(...selectors.map(qAll)))].slice(0,400);
       const out=[];
