@@ -1,4 +1,4 @@
-cd ~/src/videsapp-api
+cd  /src/videsapp-api
 cat > scrapers/ahumada.js <<'EOF'
 // scrapers/ahumada.js (ESM) — SFCC/Demandware
 export const sourceId = 'ahumada';
