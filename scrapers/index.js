@@ -121,12 +121,12 @@ async function dumpPage(page, sourceId, step) {
 // firmas: (page,q) y (q,{puppeteer})
 async function callScraperFlexible(s, page, q) {
   try {
-    const maybe = await s.fn(page, q);
-    if (Array.isArray(maybe)) return maybe;
-    if (maybe && typeof maybe.then === 'function') { const r = await maybe; if (Array.isArray(r)) return r; }
-  } catch (e) { log(s.id, 'firma(page,q) error:', e?.message || e); }
-  try {
     const maybe = await s.fn(q, { puppeteer });
+    if (Array.isArray(maybe)) return maybe;
+    if (maybe && typeof maybe.then === "function") { const r = await maybe; if (Array.isArray(r)) return r; }
+  } catch (e) { log(s.id, "firma(q,{puppeteer}) error:", e?.message || e); }
+  try {
+    const maybe = await s.fn(page, q);
     if (Array.isArray(maybe)) return maybe;
     if (maybe && typeof maybe.then === 'function') { const r = await maybe; if (Array.isArray(r)) return r; }
   } catch (e) { log(s.id, 'firma(q,{puppeteer}) error:', e?.message || e); throw e; }
