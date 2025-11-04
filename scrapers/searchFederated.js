@@ -33,7 +33,7 @@ function nearestBranch(storeName, userLat, userLng) {
     if (!best || d < best.distance_km) best = { ...b, distance_km: Math.round(d * 10) / 10 };
   }
   if (!best) return null;
-  const maps = \`https://www.google.com/maps/dir/\${userLat},\${userLng}/\${encodeURIComponent(best.address || \`\${best.lat},\${best.lng}\`)}\`;
+  const maps = `https://www.google.com/maps/dir/${userLat},${userLng}/${encodeURIComponent(best.address || `${best.lat},${best.lng}`)}`;
   return { name: best.name, address: best.address, lat: best.lat, lng: best.lng, distance_km: best.distance_km, maps_url: maps };
 }
 
@@ -60,7 +60,7 @@ function normalizeItem(it) {
 function pickTop1PerStore(items) {
   const by = new Map();
   for (const it of items) {
-    const key = it.pharmacy.toLowerCase();
+    const key = (it.pharmacy || "").toLowerCase();
     const cur = by.get(key);
     if (!cur || it.price < cur.price) by.set(key, it);
   }
@@ -70,6 +70,7 @@ function pickTop1PerStore(items) {
 export async function federatedSearchTop1(q, ctx = {}) {
   let query = "";
   let lat = null, lng = null, limitPerStore = 10;
+
   if (typeof q === "string") {
     query = q.trim();
   } else if (q && typeof q === "object") {
@@ -78,6 +79,7 @@ export async function federatedSearchTop1(q, ctx = {}) {
     lng = Number.isFinite(q.lng) ? q.lng : null;
     if (Number.isFinite(q.limitPerStore)) limitPerStore = q.limitPerStore;
   }
+
   if (Number.isFinite(ctx.lat)) lat = ctx.lat;
   if (Number.isFinite(ctx.lng)) lng = ctx.lng;
   if (Number.isFinite(ctx.limitPerStore)) limitPerStore = ctx.limitPerStore;
@@ -88,11 +90,11 @@ export async function federatedSearchTop1(q, ctx = {}) {
   try {
     agg = await scrapePrices(query);
   } catch (err) {
-    if (ctx.logger?.error) ctx.logger.error(\`federated: scrapePrices error: \${err?.message || err}\`);
+    if (ctx.logger?.error) ctx.logger.error(`federated: ${err?.message || err}`);
     return [];
   }
 
-  const normalized = (agg?.items ?? [])
+  const normalized = (Array.isArray(agg?.items) ? agg.items : [])
     .map(normalizeItem)
     .filter(Boolean)
     .filter(x => x.stock !== "out");
