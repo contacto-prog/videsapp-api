@@ -18,3 +18,5 @@ export async function searchCruzVerde(query, { limit = 10, debug = false, baseUr
     await browser.close();
   }
 }
+
+export const fetchCruzVerde = (...a)=>searchCruzVerde(...a);
