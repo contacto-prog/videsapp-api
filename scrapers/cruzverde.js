@@ -7,7 +7,7 @@ export async function searchCruzVerde(query, { limit = 10, debug = false, baseUr
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     // Espera a que el frontend cargue productos (ajustaremos selector tras /search2?debug=1)
-    await page.waitForTimeout(1500);
+    await new Promise(r=>setTimeout(r,1500));
     const html = await page.content();
 
     // TODO: cuando veamos el HTML real en debug, pondremos selectores precisos.
