@@ -33,11 +33,26 @@ const SOURCES = [
 ];
 
 const FALLBACK = {
-  [cv]: { buildUrl: q => `https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}`, selectors: ['[data-product-id]','.product-tile','.product-list__item','article'], nameSel: ['h3','h2','.product-title','a[title]'], priceSel: ['.price','.product-price','[class*="price"]'] },
-  [sb]: { buildUrl: q => `https://salcobrand.cl/search?q=${encodeURIComponent(q)}`, selectors: ['.product','.product-grid__item','[data-sku]','article'], nameSel: ['h3','h2','.product-title','.title','a[title]'], priceSel: ['.price','.product-price','[class*="price"]'] },
-  [ah]: { buildUrl: q => `https://www.farmaciasahumada.cl/search?q=${encodeURIComponent(q)}`, selectors: ['.product-grid-item','.product-item','[data-product-id]','article'], nameSel: ['h3','h2','.product-title','.title','a[title]'], priceSel: ['.price','.product-price','[class*="price"]'] },
-  [fe]: { buildUrl: q => `https://farmex.cl/search?q=${encodeURIComponent(q)}`, selectors: ['.product-card','.product','article','.grid-item'], nameSel: ['h3','h2','.product-title','.title','a[title]'], priceSel: ['.price','.product-price','[class*="price"]'] },
-  [ds]: { buildUrl: q => `https://www.drsimi.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`, selectors: ['.product-item','.item','[data-product-id]','article'], nameSel: ['h3','h2','.product-title','.title','a[title]'], priceSel: ['.price','.product-price','[class*="price"]'] },
+  [cv]: { buildUrl: q => `https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}`,
+    selectors: ["[data-product-id]",".product",".product-card",".product-tile",".product-list__item","article","li"],
+    nameSel: ["h1","h2","h3",".product-title","a[title]","a"],
+    priceSel: ["[class*=price]",".price",".product-price",".pricing","[data-price]"] },
+  [sb]: { buildUrl: q => `https://salcobrand.cl/search?q=${encodeURIComponent(q)}`,
+    selectors: [".product",".product-grid__item","[data-sku]","article","li",".grid-item"],
+    nameSel: ["h1","h2","h3",".product-title",".title","a[title]","a"],
+    priceSel: ["[class*=price]",".price",".product-price",".pricing","[data-price]"] },
+  [ah]: { buildUrl: q => `https://www.farmaciasahumada.cl/search?q=${encodeURIComponent(q)}`,
+    selectors: [".product-grid-item",".product-item","[data-product-id]","article","li",".grid-item"],
+    nameSel: ["h1","h2","h3",".product-title",".title","a[title]","a"],
+    priceSel: ["[class*=price]",".price",".product-price",".pricing","[data-price]"] },
+  [fe]: { buildUrl: q => `https://farmex.cl/search?q=${encodeURIComponent(q)}`,
+    selectors: [".product-card",".product","article",".grid-item","li"],
+    nameSel: ["h1","h2","h3",".product-title",".title","a[title]","a"],
+    priceSel: ["[class*=price]",".price",".product-price",".pricing","[data-price]"] },
+  [ds]: { buildUrl: q => `https://www.drsimi.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`,
+    selectors: [".product-item",".item","[data-product-id]","article","li"],
+    nameSel: ["h1","h2","h3",".product-title",".title","a[title]","a"],
+    priceSel: ["[class*=price]",".price",".product-price",".pricing","[data-price]"] },
 };
 
 // ----------------------------- Caché memoria ----------------------------
@@ -136,49 +151,66 @@ async function callScraperFlexible(s, page, q) {
 function buildGenericExtractor(sourceId) {
   const cfg = FALLBACK[sourceId]; if (!cfg) return null;
   const { selectors, nameSel, priceSel } = cfg;
-  return async function genericExtract(page) {
-    // Esperas simples, sin networkidle (evita frames detach)
-    await page.waitForSelector('body', { timeout: 20000 }).catch(()=>{});
-    await new Promise(r=>setTimeout(r,800));
-
-    // Click cookies si aparece
-    try {
-      const cookieBtn = await page.$x("//button[contains(translate(., 'ACEPTAR', 'aceptar'),'acept') or contains(., 'Aceptar') or contains(., 'aceptar')]");
-      if (cookieBtn[0]) { await cookieBtn[0].click().catch(()=>{}); await new Promise(r=>setTimeout(r,600)); }
-    } catch {}
-
-    await dumpPage(page, sourceId, 'generic-pre-scan');
-
-    // Scroll suave
-    try {
-      await page.evaluate(async () => {
-        const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
-        for (let y = 0; y < document.body.scrollHeight; y += 700) { window.scrollTo(0, y); await sleep(200); }
-        window.scrollTo(0, 0);
-      });
-      await new Promise(r=>setTimeout(r,500));
-    } catch {}
-
-    await dumpPage(page, sourceId, 'generic-post-scroll');
-
-    // Extrae
-    const items = await page.evaluate(({ selectors, nameSel, priceSel, sourceId }) => {
-      const norm = (s) => (s || '').replace(/\s+/g,' ').trim();
-      const getPrice = (txt) => { if (!txt) return null; const m = txt.replace(/\./g,'').match(/(\$?\s*\d[\d\s]*)/); if (!m) return null; const n = parseInt(m[1].replace(/[^\d]/g,''),10); return Number.isFinite(n) && n>0 ? n : null; };
-      const selList = selectors.join(','); const nodes = Array.from(document.querySelectorAll(selList));
-      const take = [];
-      for (const el of nodes) {
-        const nameEl = el.querySelector(nameSel.join(',')) || el.closest('article, .product, .product-item, .product-card, .grid-item')?.querySelector(nameSel.join(','));
-        const priceEl = el.querySelector(priceSel.join(',')); const linkEl = el.querySelector('a');
-        const name  = norm(nameEl?.textContent || ''); const price = getPrice(priceEl?.textContent || ''); const url = linkEl?.href || '';
-        if (name && url && price) take.push({ source: sourceId, name, price, url });
-        if (take.length >= 30) break;
+  return async function genericExtract(page){
+  try { await page.waitForSelector("body", { timeout: 20000 }).catch(()=>{}); } catch {}
+  await new Promise(r=>setTimeout(r,900));
+  try {
+    const cookieBtn = await page.$x("//button[contains(translate(., 'ACEPTAR','aceptar'),'acept') or contains(., 'Aceptar') or contains(., 'aceptar')]");
+    if (cookieBtn[0]) { await cookieBtn[0].click().catch(()=>{}); await new Promise(r=>setTimeout(r,600)); }
+  } catch {}
+  const items = await page.evaluate(({selectors,nameSel,priceSel,sourceId})=>{
+    const norm = s => (s||"").replace(/\s+/g," ").trim();
+    const priceFrom = txt => {
+      if (!txt) return null;
+      const clean = txt.replace(/\./g,"");
+      const m = clean.match(/\$?\s*(\d[\d\s]{2,})/);
+      if (!m) return null;
+      const n = parseInt(m[1].replace(/[^\d]/g,""),10);
+      return Number.isFinite(n) && n>0 ? n : null;
+    };
+    const nearPrice = el => {
+      const probes = [...el.querySelectorAll(priceSel.join(","))];
+      for (const p of probes) { const v = priceFrom(p.textContent); if (v) return v; }
+      let cur = el, depth = 0;
+      while (cur && depth < 3) {
+        const cand = [...cur.querySelectorAll("[class*=price], .price, .product-price, [data-price]")];
+        for (const p of cand) { const v = priceFrom(p.textContent); if (v) return v; }
+        cur = cur.parentElement; depth++;
       }
-      return take;
-    }, { selectors, nameSel, priceSel, sourceId });
-
-    return items;
-  };
+      return null;
+    };
+    const qAll = sel => { try { return Array.from(document.querySelectorAll(sel)); } catch { return []; } };
+    const blocks = [...new Set([].concat(...selectors.map(qAll)))];
+    const out = [];
+    for (const el of blocks) {
+      const nameEl = el.querySelector(nameSel.join(",")) ||
+        el.closest("article, .product, .product-item, .product-card, .grid-item, li")?.querySelector(nameSel.join(",")) ||
+        el.querySelector("a[title], a[href]");
+      const linkEl = el.querySelector("a[href]") || nameEl;
+      const name = norm(nameEl?.textContent || "");
+      let price = nearPrice(el);
+      if (!price) {
+        const txt = norm(el.textContent || "");
+        const m = txt.replace(/\./g,"").match(/\$?\s*(\d{3,}(?:\s\d{3})*)/);
+        if (m) { const n = parseInt(m[1].replace(/[^\d]/g,""),10); if (Number.isFinite(n)) price = n; }
+      }
+      const url = linkEl && linkEl.href ? linkEl.href : "";
+      if (name && url && price) out.push({ source: sourceId, name, price, url });
+      if (out.length >= 40) break;
+    }
+    if (!out.length) {
+      const anchors = Array.from(document.querySelectorAll("a[href]"));
+      for (const a of anchors) {
+        const pname = norm(a.textContent || ""); if (!pname) continue;
+        const container = a.closest("li,article,.product,.item,.grid-item");
+        const p = priceFrom(container?.textContent || "");
+        if (p) { out.push({ source: sourceId, name: pname, price: p, url: a.href }); if (out.length >= 40) break; }
+      }
+    }
+    return out;
+  }, {selectors,nameSel,priceSel,sourceId});
+  return items;
+};
 }
 
 async function runFallbackForSource(browser, sourceId, q) {
