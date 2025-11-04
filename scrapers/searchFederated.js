@@ -2,12 +2,12 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { scrapePrices } from "./index.js"; // <-- usa tu agregador actual
+import { scrapePrices } from "./index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STORES_FILE = path.join(__dirname, "..", "data", "stores.json");
 
-// Haversine en km
+// ----------------- utilidades geográficas -----------------
 function distanceKm(a, b) {
   const R = 6371;
   const dLat = (b.lat - a.lat) * Math.PI / 180;
@@ -25,7 +25,7 @@ function nearestBranch(storeName, userLat, userLng) {
     const raw = fs.readFileSync(STORES_FILE, "utf8");
     const all = JSON.parse(raw);
     branches = all.filter(x => (x.store || "").toLowerCase() === String(storeName).toLowerCase());
-  } catch { /* sin archivo o sin sucursales */ }
+  } catch { /* no file / no branches */ }
 
   if (!branches.length) return null;
   const me = { lat: userLat, lng: userLng };
@@ -40,66 +40,102 @@ function nearestBranch(storeName, userLat, userLng) {
   return { name: best.name, address: best.address, lat: best.lat, lng: best.lng, distance_km: best.distance_km, maps_url: maps };
 }
 
-// Normaliza un item de tu agregador a la forma final
+// ----------------- normalización y ranking -----------------
 function normalizeItem(it) {
   if (!it) return null;
-  const store = it.source || it.store || "";
-  const name = (it.name || "").toString().trim();
-  const price = Number(it.price);
-  const url = it.url || null;
-  const available = (typeof it.available === "boolean") ? it.available : true;
-  if (!store || !name || !Number.isFinite(price)) return null;
-  return { store, name, price, currency: it.currency || "CLP", url, available, sku: it.sku || null };
+  const pharmacy = it.source || it.store || "";   // tu agregador usa source/store
+  const product_name = String(it.name || "").trim();
+  const priceNum = Number(it.price);
+  if (!pharmacy || !product_name || !Number.isFinite(priceNum)) return null;
+
+  const price = Math.max(0, Math.round(priceNum));
+  const stock = (typeof it.available === "boolean") ? (it.available ? "available" : "out") : "unknown";
+
+  return {
+    pharmacy,
+    product_name,
+    presentation: String(it.presentation || "").trim(), // si no viene, queda ""
+    price,
+    stock,
+    url: it.url || null,
+    fetched_at: new Date().toISOString(),
+    sku: it.sku || null
+  };
 }
 
-// Top-1 por tienda desde un array de items normalizados
 function pickTop1PerStore(items) {
-  const byStore = new Map();
+  const by = new Map();
   for (const it of items) {
-    const key = it.store.toLowerCase();
-    const current = byStore.get(key);
-    if (!current || it.price < current.price) byStore.set(key, it);
+    const key = it.pharmacy.toLowerCase();
+    const cur = by.get(key);
+    if (!cur || it.price < cur.price) by.set(key, it);
   }
-  return Array.from(byStore.values());
+  return Array.from(by.values());
 }
 
-// ---------- API principal que usa el server ----------
-export async function federatedSearchTop1(query, { limitPerStore = 10, lat = null, lng = null, debug = false } = {}) {
-  if (!query || !query.trim()) {
-    return { ok: false, count: 0, items: [], errors: ["missing_query"] };
+// ----------------- API principal -----------------
+export async function federatedSearchTop1(q, ctx = {}) {
+  // Tolerar string u objeto
+  let query = "";
+  let lat = null, lng = null, limitPerStore = 10, debug = false;
+
+  if (typeof q === "string") {
+    query = q.trim();
+  } else if (q && typeof q === "object") {
+    query = String(q.name ?? q.q ?? "").trim();
+    lat = Number.isFinite(q.lat) ? q.lat : null;
+    lng = Number.isFinite(q.lng) ? q.lng : null;
+    if (Number.isFinite(q.limitPerStore)) limitPerStore = q.limitPerStore;
+    if (q.debug === true) debug = true;
   }
 
-  // 1) Usa tu agregador (ya maneja timeouts, reintentos y Puppeteer compartido)
+  // Permitir override via ctx
+  if (Number.isFinite(ctx.lat)) lat = ctx.lat;
+  if (Number.isFinite(ctx.lng)) lng = ctx.lng;
+  if (Number.isFinite(ctx.limitPerStore)) limitPerStore = ctx.limitPerStore;
+
+  if (!query) return [];
+
+  // 1) Llamar a tu agregador
   let agg;
   try {
     agg = await scrapePrices(query);
   } catch (err) {
-    return { ok: false, count: 0, items: [], errors: [String(err?.message || err)] };
+    // En modo server es más seguro NO romper: devuelve []
+    if (ctx.logger?.error) ctx.logger.error(`federated: scrapePrices error: ${err?.message || err}`);
+    return [];
   }
 
-  // 2) Normaliza items y toma top-1 por tienda
-  const normalized = (agg.items || []).map(normalizeItem).filter(Boolean).filter(x => x.available !== false);
+  // 2) Normalizar y filtrar disponibles
+  const normalized = (agg?.items ?? [])
+    .map(normalizeItem)
+    .filter(Boolean)
+    .filter(x => x.stock !== "out"); // evitamos los fuera de stock
+
+  // 3) Top-1 por tienda
   let picked = pickTop1PerStore(normalized);
 
-  // 3) Adjunta sucursal más cercana (si hay lat/lng)
+  // 4) Sucursal más cercana
   if (Number.isFinite(lat) && Number.isFinite(lng)) {
-    picked = picked.map(p => ({ ...p, nearest: nearestBranch(p.store, lat, lng) }));
+    picked = picked.map(p => ({ ...p, nearest: nearestBranch(p.pharmacy, lat, lng) }));
   }
 
-  // 4) Orden final por precio ascendente y limita (por prolijidad)
+  // 5) Orden y límite
   picked.sort((a, b) => a.price - b.price);
-  if (limitPerStore && Number.isFinite(limitPerStore)) {
-    // limitPerStore se aplica al total final solo para acotar payload
-    picked = picked.slice(0, Math.max(1, limitPerStore));
+  if (Number.isFinite(limitPerStore) && limitPerStore > 0) {
+    picked = picked.slice(0, limitPerStore);
   }
 
-  const payload = { ok: true, q: query, count: picked.length, items: picked };
-  if (debug) {
-    payload.debug = {
-      sourcesTried: agg.sources || [],
-      scraperErrors: agg.errors || [],
-      sample: normalized.slice(0, 3)
-    };
-  }
-  return payload;
+  // Por contrato del server: devolver **Array** puro
+  // Si necesitas depurar, usa la export extra de abajo.
+  return picked;
 }
+
+// (Opcional) Versión con metadatos para depuración manual
+export async function federatedSearchTop1WithMeta(q, ctx = {}) {
+  const items = await federatedSearchTop1(q, ctx);
+  const meta = { sourcesTried: (await scrapePrices(String(q?.name ?? q ?? ""))?.sources) || [] };
+  return { ok: true, count: items.length, items, meta };
+}
+
+export default { federatedSearchTop1 };
