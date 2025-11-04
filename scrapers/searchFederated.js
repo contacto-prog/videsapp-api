@@ -73,7 +73,6 @@ function pickTop1PerStore(items) {
   return Array.from(by.values());
 }
 
-<<<<<<< HEAD
 // ----------------- API principal -----------------
 export async function federatedSearchTop1(q, ctx = {}) {
   // Tolerar string u objeto
@@ -89,13 +88,11 @@ export async function federatedSearchTop1(q, ctx = {}) {
     if (Number.isFinite(q.limitPerStore)) limitPerStore = q.limitPerStore;
     if (q.debug === true) debug = true;
   }
-=======
 // ---------- API principal que usa el server ----------
 export async function federatedSearchTop1(q, {  limitPerStore = 10, lat = null, lng = null, debug = false  } = {}) {
   const query = (typeof q === "string") ? q.trim() : String(q?.name ?? q?.q ?? "").trim();
   if (!query) { return { ok: false, count: 0, items: [], errors: ["missing_query"] }; }
 }
->>>>>>> 15f900f (fix: aceptar string u objeto en federatedSearchTop1)
 
   // Permitir override via ctx
   if (Number.isFinite(ctx.lat)) lat = ctx.lat;
