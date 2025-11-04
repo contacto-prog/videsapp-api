@@ -139,12 +139,12 @@ function buildGenericExtractor(sourceId) {
   return async function genericExtract(page) {
     // Esperas simples, sin networkidle (evita frames detach)
     await page.waitForSelector('body', { timeout: 20000 }).catch(()=>{});
-    await page.waitForTimeout(800);
+    await new Promise(r=>setTimeout(r,800));
 
     // Click cookies si aparece
     try {
       const cookieBtn = await page.$x("//button[contains(translate(., 'ACEPTAR', 'aceptar'),'acept') or contains(., 'Aceptar') or contains(., 'aceptar')]");
-      if (cookieBtn[0]) { await cookieBtn[0].click().catch(()=>{}); await page.waitForTimeout(600); }
+      if (cookieBtn[0]) { await cookieBtn[0].click().catch(()=>{}); await new Promise(r=>setTimeout(r,600)); }
     } catch {}
 
     await dumpPage(page, sourceId, 'generic-pre-scan');
@@ -156,7 +156,7 @@ function buildGenericExtractor(sourceId) {
         for (let y = 0; y < document.body.scrollHeight; y += 700) { window.scrollTo(0, y); await sleep(200); }
         window.scrollTo(0, 0);
       });
-      await page.waitForTimeout(500);
+      await new Promise(r=>setTimeout(r,500));
     } catch {}
 
     await dumpPage(page, sourceId, 'generic-post-scroll');
@@ -193,7 +193,7 @@ async function runFallbackForSource(browser, sourceId, q) {
     // Navegación simple y estable
     await page.goto(url, { waitUntil: 'load', timeout: DEFAULT_NAV_TIMEOUT }).catch(()=>{});
     await page.waitForSelector('body', { timeout: 20000 }).catch(()=>{});
-    await page.waitForTimeout(800);
+    await new Promise(r=>setTimeout(r,800));
 
     await dumpPage(page, sourceId, 'fallback-dom');
 
