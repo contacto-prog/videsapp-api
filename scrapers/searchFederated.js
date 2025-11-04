@@ -33,7 +33,7 @@ function nearestBranch(storeName, userLat, userLng) {
     if (!best || d < best.distance_km) best = { ...b, distance_km: Math.round(d * 10) / 10 };
   }
   if (!best) return null;
-  const maps = `https://www.google.com/maps/dir/${userLat},${userLng}/${encodeURIComponent(best.address || `${best.lat},${best.lng}`)}`;
+  const maps = \`https://www.google.com/maps/dir/\${userLat},\${userLng}/\${encodeURIComponent(best.address || \`\${best.lat},\${best.lng}\`)}\`;
   return { name: best.name, address: best.address, lat: best.lat, lng: best.lng, distance_km: best.distance_km, maps_url: maps };
 }
 
@@ -88,7 +88,7 @@ export async function federatedSearchTop1(q, ctx = {}) {
   try {
     agg = await scrapePrices(query);
   } catch (err) {
-    if (ctx.logger?.error) ctx.logger.error(`federated: scrapePrices error: ${err?.message || err}`);
+    if (ctx.logger?.error) ctx.logger.error(\`federated: scrapePrices error: \${err?.message || err}\`);
     return [];
   }
 
