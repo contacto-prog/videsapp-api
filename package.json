@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "PUPPETEER_CACHE_DIR=.puppeteer npx puppeteer browsers install chrome"
+    "postinstall": "PUPPETEER_CACHE_DIR=.puppeteer npx puppeteer browsers install chrome",
+    "test:federated": "node tools/test-federated.mjs"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
