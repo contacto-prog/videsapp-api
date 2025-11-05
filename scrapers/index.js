@@ -130,7 +130,7 @@ async function runFallback(browser, source, q){
 
 export async function scrapePrices(product){
   const key = keyProduct(product);
-  const browser = await puppeteer.launch({
+  const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     headless: HEADFUL ? false : 'new',
     args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--lang=es-CL,es;q=0.9,en;q=0.8','--window-size=1280,900']
   });
