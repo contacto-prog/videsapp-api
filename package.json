@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "PUPPETEER_CACHE_DIR=.puppeteer npx puppeteer browsers install chrome",
+    "postinstall": "node -e \"process.env.PUPPETEER_CACHE_DIR=process.cwd()+'/.puppeteer'; require('child_process').execSync('npx puppeteer install chrome', {stdio:'inherit', env:process.env});\"",
     "test:federated": "node tools/test-federated.mjs"
   },
   "dependencies": {
@@ -13,6 +13,6 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "morgan": "^1.10.0",
-    "puppeteer": "^23.8.0"
+    "puppeteer": "23.11.1"
   }
 }
