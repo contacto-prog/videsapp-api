@@ -6,7 +6,7 @@ import puppeteer from 'puppeteer';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-export const __INDEX_VERSION = 'v5-minimal-stable';
+export const __INDEX_VERSION = 'v5.1-minimal-textscan';
 
 const HEADFUL = process.env.HEADFUL === '1';
 const DEBUG   = process.env.DEBUG === '1';
@@ -17,28 +17,28 @@ function log(...a){ if (DEBUG) console.log('[scrape]',...a); }
 function norm(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'').replace(/\s+/g,' ').trim(); }
 function keyProduct(s){ return norm(s).replace(/[^\w\s]/g,''); }
 
-function getPriceFromText(txt){
+function priceFrom(txt){
   if(!txt) return null;
-  const digits = txt.replace(/[^\d]/g,'');
-  if(!digits) return null;
-  const n = parseInt(digits,10);
+  const m = txt.match(/(?:\$|\b)\s*(\d{3}(?:[.\s]\d{3})*|\d{2,})/);
+  if(!m) return null;
+  const n = parseInt(m[1].replace(/[^\d]/g,''),10);
   if(!Number.isFinite(n)) return null;
   if(n < 100 || n > 200000) return null;
   return n;
 }
 
 const SOURCES = [
-  { id:'cruzverde',    url:q=>`https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}`, sel:{row:['[data-product-id]','.product','.product-card','.product-tile','.product-list__item','article','li'], name:['h1','h2','h3','.product-title','a[title]','a'], price:['[class*=price]','.price','.product-price','.pricing','[data-price]']} },
-  { id:'salcobrand',   url:q=>`https://salcobrand.cl/search?q=${encodeURIComponent(q)}`,     sel:{row:['.product','.product-grid__item','[data-sku]','article','li','.grid-item'], name:['h1','h2','h3','.product-title','.title','a[title]','a'], price:['[class*=price]','.price','.product-price','.pricing','[data-price]']} },
-  { id:'ahumada',      url:q=>`https://www.farmaciasahumada.cl/search?q=${encodeURIComponent(q)}`, sel:{row:['.product-grid-item','.product-item','[data-product-id]','article','li','.grid-item'], name:['h1','h2','h3','.product-title','.title','a[title]','a'], price:['[class*=price]','.price','.product-price','.pricing','[data-price]']} },
-  { id:'farmaexpress', url:q=>`https://farmex.cl/search?q=${encodeURIComponent(q)}`,         sel:{row:['.product-card','.product','article','.grid-item','li'], name:['h1','h2','h3','.product-title','.title','a[title]','a'], price:['[class*=price]','.price','.product-price','.pricing','[data-price]']} },
-  { id:'drsimi',       url:q=>`https://www.drsimi.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`, sel:{row:['.product-item','.item','[data-product-id]','article','li'], name:['h1','h2','h3','.product-title','.title','a[title]','a'], price:['[class*=price]','.price','.product-price','.pricing','[data-price]']} },
+  { id:'cruzverde',    url:q=>`https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}` },
+  { id:'salcobrand',   url:q=>`https://salcobrand.cl/search?q=${encodeURIComponent(q)}` },
+  { id:'ahumada',      url:q=>`https://www.farmaciasahumada.cl/search?q=${encodeURIComponent(q)}` },
+  { id:'farmaexpress', url:q=>`https://farmex.cl/search?q=${encodeURIComponent(q)}` },
+  { id:'drsimi',       url:q=>`https://www.drsimi.cl/catalogsearch/result/?q=${encodeURIComponent(q)}` },
 ];
 
 function dedupe(items){
   const seen=new Set(), out=[];
   for(const it of items){
-    const k=[norm(it.source), (it.url||'').split('?')[0], norm(it.name)].join('|');
+    const k=[norm(it.source),(it.url||'').split('?')[0],norm(it.name)].join('|');
     if(seen.has(k)) continue; seen.add(k); out.push(it);
   }
   return out;
@@ -61,26 +61,37 @@ async function runFallback(browser, source, q){
     log(source.id,'fallback →',url);
     await page.goto(url,{ waitUntil:'load', timeout:DEFAULT_NAV_TIMEOUT }).catch(()=>{});
     await page.waitForSelector('body',{ timeout:20000 }).catch(()=>{});
-    await new Promise(r=>setTimeout(r,700));
+    await new Promise(r=>setTimeout(r,800));
 
-    const rows = await page.evaluate(({id,sel})=>{
-      const selList = sel.row.join(',');
-      const nodes = Array.from(document.querySelectorAll(selList));
-      const take=[];
-      const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim();
-      const getP=(txt)=>{ if(!txt) return null; const d=txt.replace(/[^\d]/g,''); if(!d) return null; const n=parseInt(d,10); if(!Number.isFinite(n)) return null; if(n<100||n>200000) return null; return n; };
+    const rows = await page.evaluate(({id,q})=>{
+      const tokens = String(q).toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'').split(/\s+/).filter(t=>t.length>=2);
+      const nodes = Array.from(document.querySelectorAll([
+        'article','.product','.product-card','.product-tile','.product-list__item',
+        '.product-grid-item','.product-item','.grid-item','.item','li','div'
+      ].join(',')));
+      const seen = new Set();
+      const take = [];
+      function okText(t){ if(!t) return false; const s=t.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,''); return tokens.every(T=>s.includes(T)); }
+      function priceFrom(t){ if(!t) return null; const m=t.match(/(?:\$|\b)\s*(\d{3}(?:[.\s]\d{3})*|\d{2,})/); if(!m) return null; const n=parseInt(m[1].replace(/[^\d]/g,''),10); if(!Number.isFinite(n)||n<100||n>200000) return null; return n; }
+
       for(const el of nodes){
-        const nEl = el.querySelector(sel.name.join(',')) || el.closest('article, .product, .product-item, .product-card, .grid-item')?.querySelector(sel.name.join(','));
-        const pEl = el.querySelector(sel.price.join(','));
-        const aEl = el.querySelector('a');
-        const name = norm(nEl?.textContent||'');
-        const price = getP(pEl?.textContent||'');
-        const url = aEl?.href || '';
-        if(name && price && url) take.push({ source:id, name, price, url });
+        const txt = el.innerText || '';
+        if(!okText(txt)) continue;
+        const price = priceFrom(txt);
+        if(!price) continue;
+        let name = txt.replace(/\s+/g,' ').trim();
+        if(name.length>140) name = name.slice(0,140);
+        let href = '';
+        const a = el.querySelector('a[href]');
+        if(a && a.href) href = a.href;
+        const key = name+'|'+price+'|'+href;
+        if(seen.has(key)) continue;
+        seen.add(key);
+        take.push({ source:id, name, price, url: href });
         if(take.length>=40) break;
       }
       return take;
-    }, { id: source.id, sel: source.sel });
+    },{ id: source.id, q });
 
     log(source.id,'fallback_items:', Array.isArray(rows)?rows.length:0);
     return Array.isArray(rows)?rows:[];
