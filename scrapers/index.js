@@ -6,24 +6,25 @@ import puppeteer from 'puppeteer';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-export const __INDEX_VERSION = 'v5.1-minimal-textscan';
+export const __INDEX_VERSION = 'v5.2-textscan-clp';
 
 const HEADFUL = process.env.HEADFUL === '1';
 const DEBUG   = process.env.DEBUG === '1';
 const DEFAULT_NAV_TIMEOUT = 35000;
 
 function log(...a){ if (DEBUG) console.log('[scrape]',...a); }
-
 function norm(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'').replace(/\s+/g,' ').trim(); }
 function keyProduct(s){ return norm(s).replace(/[^\w\s]/g,''); }
+function nonNumericTokens(q){ return norm(q).split(/\s+/).filter(t=>t.length>=2 && /[a-z]/.test(t)); }
 
 function priceFrom(txt){
   if(!txt) return null;
-  const m = txt.match(/(?:\$|\b)\s*(\d{3}(?:[.\s]\d{3})*|\d{2,})/);
+  let m = txt.match(/\$\s*([0-9]{1,3}(?:[.\s][0-9]{3})+)/);
+  if(!m) m = txt.match(/\b([0-9]{1,3}(?:[.\s][0-9]{3})+)\b/);
+  if(!m) m = txt.match(/\$\s*([0-9]{3,})/);
   if(!m) return null;
   const n = parseInt(m[1].replace(/[^\d]/g,''),10);
-  if(!Number.isFinite(n)) return null;
-  if(n < 100 || n > 200000) return null;
+  if(!Number.isFinite(n) || n < 500 || n > 200000) return null;
   return n;
 }
 
@@ -64,30 +65,57 @@ async function runFallback(browser, source, q){
     await new Promise(r=>setTimeout(r,800));
 
     const rows = await page.evaluate(({id,q})=>{
-      const tokens = String(q).toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'').split(/\s+/).filter(t=>t.length>=2);
+      const tokens = String(q).toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'').split(/\s+/).filter(t=>t.length>=2 && /[a-z]/.test(t));
+      const bad = /(resultados de busqueda|busqueda|filtros|refine|precio \$0|decreto|normativa|ley|llama|llamanos|tel:|\+?\s?56\d{7,})/i;
+      const priceSel = ['[class*=price]','[data-price]','.price','.product-price','.pricing','.js-price','.vtex-product-price'].join(',');
+      const titleSel = 'h1,h2,h3,.product-title,.title,a[title]';
       const nodes = Array.from(document.querySelectorAll([
         'article','.product','.product-card','.product-tile','.product-list__item',
-        '.product-grid-item','.product-item','.grid-item','.item','li','div'
+        '.product-grid-item','.product-item','.grid-item','.item','li','.vtex-product-summary-2-x-container','div'
       ].join(',')));
       const seen = new Set();
       const take = [];
-      function okText(t){ if(!t) return false; const s=t.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,''); return tokens.every(T=>s.includes(T)); }
-      function priceFrom(t){ if(!t) return null; const m=t.match(/(?:\$|\b)\s*(\d{3}(?:[.\s]\d{3})*|\d{2,})/); if(!m) return null; const n=parseInt(m[1].replace(/[^\d]/g,''),10); if(!Number.isFinite(n)||n<100||n>200000) return null; return n; }
+
+      function priceFrom(t){
+        if(!t) return null;
+        let m = t.match(/\$\s*([0-9]{1,3}(?:[.\s][0-9]{3})+)/);
+        if(!m) m = t.match(/\b([0-9]{1,3}(?:[.\s][0-9]{3})+)\b/);
+        if(!m) m = t.match(/\$\s*([0-9]{3,})/);
+        if(!m) return null;
+        const n = parseInt(m[1].replace(/[^\d]/g,''),10);
+        if(!Number.isFinite(n) || n < 500 || n > 200000) return null;
+        return n;
+      }
+      function okTokens(text){
+        const s = text.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
+        return tokens.every(t=>s.includes(t));
+      }
 
       for(const el of nodes){
-        const txt = el.innerText || '';
-        if(!okText(txt)) continue;
-        const price = priceFrom(txt);
-        if(!price) continue;
-        let name = txt.replace(/\s+/g,' ').trim();
-        if(name.length>140) name = name.slice(0,140);
+        let priceText = '';
+        const pEl = el.querySelector(priceSel);
+        if(pEl && pEl.innerText) priceText = pEl.innerText;
+        const p = priceFrom(priceText || el.innerText || '');
+        if(!p) continue;
+
+        let name = '';
+        const tEl = el.querySelector(titleSel);
+        if(tEl && tEl.innerText) name = tEl.innerText;
+        if(!name) name = (el.innerText||'').replace(/\s+/g,' ').trim();
+        if(!name || bad.test(name)) continue;
+        if(!okTokens(name)) continue;
+
         let href = '';
         const a = el.querySelector('a[href]');
         if(a && a.href) href = a.href;
-        const key = name+'|'+price+'|'+href;
+
+        name = name.replace(/\s+/g,' ').trim();
+        if(name.length>140) name = name.slice(0,140);
+
+        const key = name+'|'+p+'|'+href;
         if(seen.has(key)) continue;
         seen.add(key);
-        take.push({ source:id, name, price, url: href });
+        take.push({ source:id, name, price:p, url: href });
         if(take.length>=40) break;
       }
       return take;
