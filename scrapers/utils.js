@@ -1,25 +1,78 @@
 // scrapers/utils.js
+
+/* ===== Utilidades básicas ===== */
 export const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
 export function normalizeProduct(q) {
   return (q || "").trim().toLowerCase();
 }
 
-export function pickPriceFromText(text) {
-  const re = /(?:\$|\bCLP\b)?\s*([0-9]{1,3}(?:[\.\s][0-9]{3})+|[0-9]+)(?:,[0-9]{2})?/g;
+/* ======== PARSEO ROBUSTO DE PRECIOS CLP ======== */
+/**
+ * Normaliza y convierte a entero CLP:
+ *  "$ 10.990", "CLP 10.990", "10990", "10,990", "Precio: 10.990"  -> 10990
+ *  Filtra fuera valores irreales (<$100 o >$500.000)
+ */
+export function parsePriceCLP(input) {
+  if (input == null) return null;
+
+  const s = String(input)
+    .replace(/\u00A0/g, ' ')      // no-break space
+    .replace(/CLP/gi, '')
+    .replace(/pesos?/gi, '')
+    .replace(/[^\d.,]/g, '')      // deja solo dígitos y separadores
+    .trim();
+
+  if (!s) return null;
+
+  // Chile: tratamos todo como entero en CLP (sin decimales)
+  const normalized = s
+    .replace(/\./g, '')           // miles con punto
+    .replace(/,/g, '');           // por si viniera con coma
+
+  const n = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(n)) return null;
+  if (n < 100 || n > 500000) return null; // rango razonable por unidad
+
+  return n;
+}
+
+/**
+ * Busca el primer precio con patrón CLP dentro de un HTML o innerText.
+ * Útil como fallback cuando no hay selectores estables.
+ */
+export function pickPriceFromHtml(textOrHtml) {
+  if (!textOrHtml) return null;
+  const str = String(textOrHtml).replace(/\u00A0/g, ' ');
+  // Captura formatos: $ 10.990 | CLP 10.990 | 10990 | 10,990
+  const re = /(?:CLP|\$)?\s*\d{1,3}(?:[.\s]\d{3})+|\d{4,6}/g;
   let best = null;
-  for (const m of text.matchAll(re)) {
-    const raw = m[1].replace(/\s/g, "");
-    const n = parseInt(raw.replace(/\./g, ""), 10);
-    if (!Number.isNaN(n)) {
-      if (n > 150 && n < 500000) {
-        if (best === null || n < best) best = n;
-      }
+  for (const m of str.matchAll(re)) {
+    const p = parsePriceCLP(m[0]);
+    if (p) {
+      // elegimos el menor precio válido encontrado (evita precios tachados mayores)
+      if (best == null || p < best) best = p;
     }
   }
   return best;
 }
 
+/**
+ * Equivalente a lo que usaríamos dentro de evaluate() si tenemos una "card" DOM.
+ * Recibe un elemento (en evaluate) o un HTML string (fuera) y prueba selectores comunes.
+ */
+export function extractPriceFromCardLike(cardHtmlOrText) {
+  // fallback directo por HTML/texto
+  return pickPriceFromHtml(cardHtmlOrText);
+}
+
+/* ===== Compatibilidad: mantiene tu API previa pero internamente usa el parser robusto ===== */
+export function pickPriceFromText(text) {
+  // compatible con tu firma original, ahora con parser robusto
+  return pickPriceFromHtml(text);
+}
+
+/* ===== JSON-LD ===== */
 export async function extractJsonLdPrices(page) {
   const jsons = await page.$$eval('script[type="application/ld+json"]', nodes =>
     nodes.map(n => n.textContent).filter(Boolean)
@@ -29,10 +82,15 @@ export async function extractJsonLdPrices(page) {
       const data = JSON.parse(txt);
       const arr = Array.isArray(data) ? data : [data];
       for (const d of arr) {
-        const price = d?.offers?.price || d?.offers?.lowPrice || d?.price || d?.offers?.[0]?.price;
-        if (price) {
-          const n = parseInt(String(price).replace(/\D/g, ""), 10);
-          if (!Number.isNaN(n)) return n;
+        const price =
+          d?.offers?.price ??
+          d?.offers?.lowPrice ??
+          d?.price ??
+          d?.offers?.[0]?.price ??
+          null;
+        if (price != null) {
+          const n = parsePriceCLP(price);
+          if (n) return n;
         }
       }
     } catch {}
@@ -40,10 +98,16 @@ export async function extractJsonLdPrices(page) {
   return null;
 }
 
+/* ===== Primer precio robusto en una página ===== */
 export async function robustFirstPrice(page, extraSelectorHints = []) {
+  // 1) JSON-LD primero
   const j = await extractJsonLdPrices(page);
   if (j) return j;
+
+  // 2) Selectores típicos de precio
   const selectors = [
+    '[itemprop="price"]',
+    '[data-price]',
     '[data-testid*="price"]',
     '[data-qa*="price"]',
     '[class*="price"]',
@@ -51,20 +115,31 @@ export async function robustFirstPrice(page, extraSelectorHints = []) {
     '.product-price',
     '.price__current',
     '.best-price',
+    '.amount',
     '.value',
     ...extraSelectorHints,
   ];
+
   for (const sel of selectors) {
     try {
-      const txt = await page.$eval(sel, el => el.innerText || el.textContent || "");
-      const p = pickPriceFromText(txt);
+      const txt = await page.$eval(sel, el =>
+        (el.getAttribute?.('content') ||
+         el.getAttribute?.('data-price') ||
+         el.textContent ||
+         el.innerText ||
+         '')
+      );
+      const p = parsePriceCLP(txt) ?? pickPriceFromHtml(txt);
       if (p) return p;
     } catch {}
   }
-  const body = await page.evaluate(() => document.body?.innerText || "");
-  return pickPriceFromText(body);
+
+  // 3) Fallback total: revisar todo el body
+  const body = await page.evaluate(() => document.body?.innerText || document.body?.textContent || '');
+  return pickPriceFromHtml(body);
 }
 
+/* ===== Banners de cookies ===== */
 export async function tryDismissCookieBanners(page) {
   try {
     const texts = ['Aceptar', 'Acepto', 'Entendido', 'Continuar', 'De acuerdo', 'OK'];
@@ -84,8 +159,7 @@ export async function tryDismissCookieBanners(page) {
   } catch {}
 }
 
-/* ===== Robustez adicional ===== */
-
+/* ===== Robustez adicional navegación ===== */
 export async function safeGoto(page, url, timeout = 20000) {
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
@@ -112,7 +186,6 @@ export async function autoScroll(page, { steps = 10, delay = 300 } = {}) {
 }
 
 /* === VTEX helpers === */
-
 async function tryVtexState(page) {
   try {
     const state = await page.evaluate(() => {
@@ -228,8 +301,9 @@ export async function tryVtexSearch(page, product, mapItem = (p) => p) {
         let link = null;
         if (p?.link) link = p.link;
         else if (p?.linkText) link = `/${p.linkText}/p`;
-        if (name && Number.isFinite(price)) {
-          out.push(mapItem({ title: name, price: Math.round(price), url: link || null }));
+        const parsed = parsePriceCLP(price);
+        if (name && parsed) {
+          out.push(mapItem({ title: name, price: parsed, url: link || null }));
         }
       }
       if (out.length) return out;
@@ -245,13 +319,15 @@ export async function tryVtexSearch(page, product, mapItem = (p) => p) {
   }
 }
 
+/* ===== Pick cards con parseo de precio robusto ===== */
 export async function pickCards(page, sels) {
   const { cards, name = [], price = [], link = [] } = sels;
-  return await page.$$eval(cards, (nodes, nameSels, priceSels, linkSels) => {
+  const raw = await page.$$eval(cards, (nodes, nameSels, priceSels, linkSels) => {
     const pick = (el, sels) => {
       for (const s of sels) {
         const n = el.querySelector(s);
-        if (n && n.textContent && n.textContent.trim()) return n.textContent.trim();
+        const txt = n && (n.textContent || n.innerText);
+        if (txt && txt.trim()) return txt.trim();
       }
       return null;
     };
@@ -264,19 +340,36 @@ export async function pickCards(page, sels) {
     };
     return nodes.map(card => ({
       name: pick(card, nameSels),
-      price: pick(card, priceSels),
+      priceRaw: pick(card, priceSels) || card.innerText || card.textContent || '',
       link: pickLink(card, linkSels),
-    })).filter(x => x.name && x.price);
+    })).filter(x => x.name && x.priceRaw);
   }, name, price, link).catch(() => []);
+
+  // Normalizamos precios en Node para no depender del DOM
+  return raw.map(r => ({
+    name: normalize(r.name),
+    price: parsePriceCLP(r.priceRaw) ?? pickPriceFromHtml(r.priceRaw),
+    link: r.link || null,
+  })).filter(x => x.name && Number.isFinite(x.price));
 }
 
+/* ===== Normalizadores legacy ===== */
 export function normalize(str) {
   if (!str) return '';
   return String(str).replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
 }
 
+/**
+ * Conservamos la función legacy, pero ahora intenta usar nuestro parser CLP.
+ * Nota: esta devuelve Number (puede traer decimales si el texto lo trae),
+ * pero en Chile seguiremos retornando enteros en CLP cuando se pueda.
+ */
 export function parsePrice(text) {
   if (!text) return NaN;
+  const byCLP = parsePriceCLP(text);
+  if (byCLP) return byCLP;
+
+  // fallback: heurística original
   let t = String(text).replace(/[^\d.,-]/g, '').replace(/\s+/g, '').trim();
   const comma = (t.match(/,/g) || []).length;
   const dot = (t.match(/\./g) || []).length;
