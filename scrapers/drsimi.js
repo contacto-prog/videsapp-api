@@ -33,6 +33,7 @@ export async function fetchDrSimi(
   let page;
   try {
     page = await browser.newPage();
+    await setPageDefaults(page);
 
     // Rutas de búsqueda que suelen existir en Shopify / implementaciones personalizadas
     const searchUrls = [
@@ -87,6 +88,7 @@ export async function fetchDrSimi(
       if (!ok) continue;
 
       await tryDismissCookieBanners(page);
+      await page.waitForTimeout(1500);
       await autoScroll(page, { steps: 8, delay: 250 });
       await page.waitForTimeout(800);
 
