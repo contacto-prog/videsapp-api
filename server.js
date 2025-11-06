@@ -89,7 +89,7 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// /api/prices → lista completa
+// /api/prices → lista completa (mueve ESTA ruta ANTES del 404 y ANTES de app.listen)
 app.get("/api/prices", async (req,res)=>{
   try{
     const q = String(req.query.q || "").trim();
@@ -102,6 +102,25 @@ app.get("/api/prices", async (req,res)=>{
       headless: "new",
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH
     });
+
+    res.json({
+      ok: true,
+      q,
+      count: items.length,
+      items: items.map(r => ({
+        store: r.store,
+        name:  r.name,
+        price: r.price,
+        url:   r.url || null,
+        stock: r.stock ?? true
+      }))
+    });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: String(e?.message || e) });
+  }
+});
+// 404 (debe ir AL FINAL)
+app.use((req, res) => res.status(404).json({ ok:false, error:"not_found", path:req.path }));
 
     // Formato limpio para tu app (solo botón “Ir” usa url; no agrego “comprar”)
     res.json({
