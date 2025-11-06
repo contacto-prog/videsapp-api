@@ -1,3 +1,4 @@
+cat > scrapers/searchfederated.js <<'EOF'
 // scrapers/searchfederated.js
 import puppeteer from "puppeteer";
 import { normalize } from "./utils.js";
@@ -38,11 +39,11 @@ export async function searchFederated(q, { headless = "new", executablePath } = 
         const res = await fn(query, opts);
         if (process.env.DEBUG_PRICES) {
           const withPrice = (res || []).filter(x => Number.isFinite(x?.price));
-          console.error(`[${name}] total=${res?.length || 0} conPrecio=${withPrice.length}`);
+          console.error(\`[\${name}] total=\${res?.length || 0} conPrecio=\${withPrice.length}\`);
         }
         return res || [];
       } catch (e) {
-        if (process.env.DEBUG_PRICES) console.error(`[${name}] ERROR:`, e?.message || e);
+        if (process.env.DEBUG_PRICES) console.error(\`[\${name}] ERROR:\`, e?.message || e);
         return [];
       }
     })
@@ -70,7 +71,7 @@ export async function searchFederated(q, { headless = "new", executablePath } = 
   const seen = new Set();
   const dedup = [];
   for (const it of items) {
-    const key = `${it.store}|${it.name}|${it.price}`;
+    const key = \`\${it.store}|\${it.name}|\${it.price}\`;
     if (!seen.has(key)) {
       seen.add(key);
       dedup.push(it);
@@ -93,4 +94,6 @@ export async function federatedSearchTop1(q, opts = {}) {
   return Array.from(bestByStore.values()).sort((a, b) => a.price - b.price);
 }
 
-export default { searchFederated, federatedSearchTop1 };
+const defaultExport = { searchFederated, federatedSearchTop1 };
+export default defaultExport;
+EOF
