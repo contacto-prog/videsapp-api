@@ -76,13 +76,12 @@ app.get("/search2", async (req, res) => {
     res.status(500).json({ ok:false, error:String(err?.message || err) });
   }
 });
-
-// federado (por compat)
+// federado (compat)
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-    const { federatedSearchTop1 } = await import("./scrapers/searchFederated.js");
+    const { federatedSearchTop1 } = await import("./scrapers/searchfederated.js"); // 👈 minúsculas
     const data = await federatedSearchTop1(q);
     res.json(data);
   } catch (err) {
@@ -90,6 +89,37 @@ app.get("/search", async (req, res) => {
   }
 });
 
+// /api/prices → lista completa
+app.get("/api/prices", async (req,res)=>{
+  try{
+    const q = String(req.query.q || "").trim();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+
+    const { searchFederated } = await import("./scrapers/searchfederated.js"); // 👈 minúsculas
+    const items = await searchFederated(q, {
+      headless: "new",
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH
+    });
+
+    // Formato limpio para tu app (solo botón “Ir” usa url; no agrego “comprar”)
+    res.json({
+      ok: true,
+      q,
+      count: items.length,
+      items: items.map(r => ({
+        store: r.store,   // "Cruz Verde", "Salcobrand", etc.
+        name:  r.name,
+        price: r.price,
+        url:   r.url || null,
+        stock: r.stock ?? true
+      }))
+    });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: String(e?.message || e) });
+  }
+});
 // nearby rápido
 app.get("/nearby", async (req, res) => {
   try {
