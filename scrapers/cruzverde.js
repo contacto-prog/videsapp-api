@@ -8,7 +8,8 @@ import {
   pickPriceFromHtml,
   tryVtexSearch,
   pickCards,
-  setPageDefaults,  // 👈
+  setPageDefaults,
+  tryCloseRegionModal,
 } from "./utils.js";
 
 export const sourceId = "cruzverde";
@@ -28,38 +29,35 @@ export async function fetchCruzVerde(
   let page;
   try {
     page = await browser.newPage();
-    await setPageDefaults(page); // 👈 UA/idioma/viewport/webdriver
+    await setPageDefaults(page);
 
     // 1) VTEX desde home
     const homeOk = await safeGoto(page, "https://www.cruzverde.cl/", 25000);
     if (homeOk) {
       await tryDismissCookieBanners(page);
+      await tryCloseRegionModal(page);
       await page.waitForTimeout(1200);
       await page
         .waitForResponse(
           r => /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(r.url()),
-          { timeout: 5000 }
+          { timeout: 6000 }
         ).catch(() => {});
       const vtex = await tryVtexSearch(page, q, (p) => p);
       if (Array.isArray(vtex) && vtex.length) {
-        const seen = new Set();
-        const out = [];
+        const seen = new Set(); const out = [];
         for (const it of vtex) {
           const name = normalize(it.title);
           const price = parsePriceCLP(it.price);
           if (!name || !price) continue;
           const key = `${name}|${price}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            out.push({ store:"Cruz Verde", name, price, img:null, url:it.url||null, stock:true });
-          }
+          if (!seen.has(key)) { seen.add(key); out.push({ store:"Cruz Verde", name, price, img:null, url:it.url||null, stock:true }); }
           if (out.length >= 40) break;
         }
         if (out.length) return out;
       }
     }
 
-    // 2) Búsqueda visible (DOM)
+    // 2) DOM visible
     const searchUrls = [
       `https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}`,
       `https://www.cruzverde.cl/${encodeURIComponent(q)}?map=ft`,
@@ -72,13 +70,14 @@ export async function fetchCruzVerde(
       if (!ok) continue;
 
       await tryDismissCookieBanners(page);
+      await tryCloseRegionModal(page);
       await page.waitForTimeout(1500);
       await autoScroll(page, { steps: 8, delay: 250 });
       await page.waitForTimeout(800);
       await page
         .waitForResponse(
           r => /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(r.url()),
-          { timeout: 5000 }
+          { timeout: 6000 }
         ).catch(() => {});
 
       const cardsSelectors = {
@@ -155,8 +154,7 @@ export async function fetchCruzVerde(
       if (got.length >= 40) break;
     }
 
-    const seen = new Set();
-    const dedup = [];
+    const seen = new Set(); const dedup = [];
     for (const r of got) {
       const key = `${r.name}|${r.price}`;
       if (!seen.has(key)) { seen.add(key); dedup.push(r); }
