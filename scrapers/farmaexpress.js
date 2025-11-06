@@ -34,6 +34,7 @@ export async function fetchFarmaexpress(
   let page;
   try {
     page = await browser.newPage();
+    await setPageDefaults(page);
 
     /* ========== 1) VTEX (si aplica) ========== */
     const homeCandidates = [
@@ -147,6 +148,7 @@ export async function fetchFarmaexpress(
       if (!ok) continue;
 
       await tryDismissCookieBanners(page);
+      await page.waitForTimeout(1500)
       await autoScroll(page, { steps: 8, delay: 250 });
       await page.waitForTimeout(800);
 
