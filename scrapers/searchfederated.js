@@ -14,7 +14,6 @@ function keyOf(q){
   return "";
 }
 
-// Lista de fuentes a consultar (nombre, función)
 const SOURCES = [
   ["Ahumada",      fetchAhumada],
   ["Cruz Verde",   fetchCruzVerde],
@@ -23,10 +22,6 @@ const SOURCES = [
   ["Dr. Simi",     fetchDrSimi],
 ];
 
-/**
- * Busca en todas las fuentes y retorna una lista plana de items normalizados.
- * @returns Promise<Array<{store:string, name:string, price:number, img?:string, url?:string, stock?:boolean}>>
- */
 export async function searchFederated(q, { headless = "new", executablePath } = {}) {
   const query = keyOf(q);
   if (!query) return [];
@@ -55,7 +50,6 @@ export async function searchFederated(q, { headless = "new", executablePath } = 
 
   const flat = settled.flatMap(r => (r.status === "fulfilled" ? r.value : [])) || [];
 
-  // Normalización final + saneamiento
   const items = flat
     .map(it => {
       const store = normalize(it?.store || it?.source || "");
@@ -73,7 +67,6 @@ export async function searchFederated(q, { headless = "new", executablePath } = 
     })
     .filter(Boolean);
 
-  // De-dup (store+name+price) para evitar repetidos
   const seen = new Set();
   const dedup = [];
   for (const it of items) {
@@ -82,21 +75,16 @@ export async function searchFederated(q, { headless = "new", executablePath } = 
       seen.add(key);
       dedup.push(it);
     }
-    if (dedup.length >= 120) break; // límite razonable
+    if (dedup.length >= 120) break;
   }
 
   return dedup;
 }
 
-/**
- * Compat: “top 1 por tienda” ordenado de más barato a más caro.
- * Devuelve al menos un mejor precio por cada farmacia.
- */
 export async function federatedSearchTop1(q, opts = {}) {
   const all = await searchFederated(q, opts);
   if (!all.length) return [];
-
-  const bestByStore = new Map(); // store -> item con menor precio
+  const bestByStore = new Map();
   for (const it of all) {
     const k = it.store.toLowerCase();
     const cur = bestByStore.get(k);
