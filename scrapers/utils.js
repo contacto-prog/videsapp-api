@@ -422,3 +422,39 @@ export async function setPageDefaults(page) {
     });
   } catch {}
 }
+// === Stealth-lite: UA, idioma, webdriver, viewport, timezone ===
+export async function setPageDefaults(page) {
+  try {
+    await page.setUserAgent(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+    await page.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+      "Upgrade-Insecure-Requests": "1",
+    });
+    // Oculta webdriver + señales típicas
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      window.chrome = window.chrome || {};
+      const permissions = navigator.permissions.query;
+      navigator.permissions.query = (parameters) =>
+        permissions(parameters).then((res) => {
+          if (parameters.name === "notifications") {
+            return Object.assign(res, { state: Notification.permission });
+          }
+          return res;
+        });
+      Object.defineProperty(navigator, 'languages', { get: () => ['es-CL', 'es', 'en'] });
+      Object.defineProperty(navigator, 'platform',  { get: () => 'MacIntel' });
+    });
+
+    // Bloquea imágenes/fuentes/medios (deja XHR/fetch)
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const type = req.resourceType();
+      if (type === "image" || type === "font" || type === "media") return req.abort();
+      return req.continue();
+    });
+  } catch {}
+}
