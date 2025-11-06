@@ -36,6 +36,7 @@ export async function fetchAhumada(q, { puppeteer, headless = "new", executableP
     if (!ok) return [];
 
     await tryDismissCookieBanners(page);
+    await page.waitForTimeout(1500);
     await autoScroll(page, { steps: 8, delay: 250 });
     await page.waitForTimeout(800); // deja cargar precios/lazy
 
