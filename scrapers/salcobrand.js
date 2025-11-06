@@ -8,7 +8,8 @@ import {
   pickPriceFromHtml,
   tryVtexSearch,
   pickCards,
-  setPageDefaults,  // 👈
+  setPageDefaults,
+  tryCloseRegionModal,
 } from "./utils.js";
 
 export const sourceId = "salcobrand";
@@ -28,22 +29,22 @@ export async function fetchSalcobrand(
   let page;
   try {
     page = await browser.newPage();
-    await setPageDefaults(page); // 👈
+    await setPageDefaults(page);
 
-    // 1) VTEX desde home
+    // 1) VTEX home
     const homeOk = await safeGoto(page, "https://www.salcobrand.cl/", 25000);
     if (homeOk) {
       await tryDismissCookieBanners(page);
+      await tryCloseRegionModal(page);
       await page.waitForTimeout(1200);
       await page
         .waitForResponse(
           r => /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(r.url()),
-          { timeout: 5000 }
+          { timeout: 6000 }
         ).catch(() => {});
       const vtex = await tryVtexSearch(page, q, (p) => p);
       if (Array.isArray(vtex) && vtex.length) {
-        const seen = new Set();
-        const out = [];
+        const seen = new Set(); const out = [];
         for (const it of vtex) {
           const name = normalize(it.title);
           const price = parsePriceCLP(it.price);
@@ -58,7 +59,7 @@ export async function fetchSalcobrand(
       }
     }
 
-    // 2) Búsqueda visible (DOM)
+    // 2) DOM visible
     const searchUrls = [
       `https://www.salcobrand.cl/search?q=${encodeURIComponent(q)}`,
       `https://www.salcobrand.cl/${encodeURIComponent(q)}?map=ft`,
@@ -107,13 +108,14 @@ export async function fetchSalcobrand(
       if (!ok) continue;
 
       await tryDismissCookieBanners(page);
+      await tryCloseRegionModal(page);
       await page.waitForTimeout(1500);
       await autoScroll(page, { steps: 8, delay: 250 });
       await page.waitForTimeout(800);
       await page
         .waitForResponse(
           r => /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(r.url()),
-          { timeout: 5000 }
+          { timeout: 6000 }
         ).catch(() => {});
 
       let picked = await pickCards(page, cardsSelectors);
@@ -163,8 +165,7 @@ export async function fetchSalcobrand(
       if (all.length >= 40) break;
     }
 
-    const seen = new Set();
-    const dedup = [];
+    const seen = new Set(); const dedup = [];
     for (const r of all) {
       const key = `${r.name}|${r.price}`;
       if (!seen.has(key)) { seen.add(key); dedup.push(r); }
