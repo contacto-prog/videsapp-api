@@ -28,6 +28,8 @@ export async function fetchAhumada(q, { puppeteer, headless = "new", executableP
   let page;
   try {
     page = await browser.newPage();
+    await setPageDefaults(page);
+
     const url = `https://www.farmaciasahumada.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`;
 
     const ok = await safeGoto(page, url, 25000);
