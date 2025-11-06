@@ -8,6 +8,7 @@ import {
   pickPriceFromHtml,
   tryVtexSearch,
   pickCards,
+  setPageDefaults,         // 👈 importante
 } from "./utils.js";
 
 export const sourceId = "cruzverde";
@@ -15,9 +16,9 @@ export const sourceId = "cruzverde";
 /**
  * Scraper Cruz Verde (Chile)
  * Estrategia:
- *  1) En la homepage, usa tryVtexSearch (endpoints internos VTEX).
- *  2) Si falla/vacío, abre la página de búsqueda y extrae desde el DOM.
- *  3) Fallback final: patrón CLP sobre tarjetas.
+ *  1) Probar VTEX (endpoints internos) desde la home.
+ *  2) Si falla/vacío, abrir página de búsqueda y extraer del DOM.
+ *  3) Fallback final: patrón CLP sobre innerText/HTML.
  */
 export async function fetchCruzVerde(
   q,
@@ -34,15 +35,26 @@ export async function fetchCruzVerde(
   let page;
   try {
     page = await browser.newPage();
+    await setPageDefaults(page);                // 👈 UA/idioma/viewport/webdriver off
 
     /* ========== 1) VTEX API desde la homepage ========== */
     const homeOk = await safeGoto(page, "https://www.cruzverde.cl/", 25000);
     if (homeOk) {
       await tryDismissCookieBanners(page);
-      // VTEX search directa (rápida y no depende del DOM visible)
+      // Espera (si existe) a las llamadas VTEX de búsqueda
+      await page.waitForTimeout(1200);
+      await page
+        .waitForResponse(
+          r =>
+            /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(
+              r.url()
+            ),
+          { timeout: 5000 }
+        )
+        .catch(() => {});
+
       const vtex = await tryVtexSearch(page, q, (p) => p);
       if (Array.isArray(vtex) && vtex.length) {
-        // Normalizamos y limitamos
         const seen = new Set();
         const out = [];
         for (const it of vtex) {
@@ -56,7 +68,7 @@ export async function fetchCruzVerde(
               store: "Cruz Verde",
               name,
               price,
-              img: null,         // VTEX no nos trae imagen en esta vía
+              img: null,
               url: it.url || null,
               stock: true,
             });
@@ -68,7 +80,6 @@ export async function fetchCruzVerde(
     }
 
     /* ========== 2) Búsqueda visible en el sitio (DOM) ========== */
-    // Varias implementaciones VTEX soportan estas rutas:
     const searchUrls = [
       `https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}`,
       `https://www.cruzverde.cl/${encodeURIComponent(q)}?map=ft`,
@@ -81,21 +92,31 @@ export async function fetchCruzVerde(
       if (!ok) continue;
 
       await tryDismissCookieBanners(page);
+      await page.waitForTimeout(1500);          // 👈 deja cargar grilla/precios
       await autoScroll(page, { steps: 8, delay: 250 });
       await page.waitForTimeout(800);
 
-      // Intento con selectores de VTEX y variaciones
+      // Espera a XHR de VTEX si ocurren
+      await page
+        .waitForResponse(
+          r =>
+            /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(
+              r.url()
+            ),
+          { timeout: 5000 }
+        )
+        .catch(() => {});
+
       const cardsSelectors = {
-        cards:
-          [
-            ".vtex-search-result-3-x-galleryItem",
-            ".vtex-search-result-3-x-galleryItem--normal",
-            ".vtex-product-summary-2-x-container",
-            ".product-item",
-            ".product-card",
-            "li.product",
-            ".shelf__item",
-          ].join(","),
+        cards: [
+          ".vtex-search-result-3-x-galleryItem",
+          ".vtex-search-result-3-x-galleryItem--normal",
+          ".vtex-product-summary-2-x-container",
+          ".product-item",
+          ".product-card",
+          "li.product",
+          ".shelf__item",
+        ].join(","),
         name: [
           ".vtex-product-summary-2-x-productBrand",
           ".vtex-product-summary-2-x-productName",
@@ -120,21 +141,21 @@ export async function fetchCruzVerde(
         ],
       };
 
-      const picked = await pickCards(page, cardsSelectors); // ya normaliza precio
+      // 1) Selectores (pickCards ya normaliza el precio)
+      let picked = await pickCards(page, cardsSelectors);
       let mapped = (picked || []).map((r) => ({
         store: "Cruz Verde",
         name: normalize(r.name),
-        price: r.price, // pickCards ya lo dejó como Number
+        price: r.price,
         img: null,
         url: r.link || null,
         stock: true,
       }));
 
-      // Si no logró por selectores, hacemos un fallback más agresivo
+      // 2) Fallback agresivo (patrón CLP)
       if (!mapped.length) {
-        const raw = await page.$$eval(
-          cardsSelectors.cards,
-          (nodes) =>
+        const raw = await page
+          .$$eval(cardsSelectors.cards, (nodes) =>
             nodes.map((card) => ({
               text: (card.innerText || card.textContent || "").trim(),
               html: card.outerHTML || "",
@@ -149,14 +170,14 @@ export async function fetchCruzVerde(
               img:
                 (card.querySelector("img") ||
                   card.querySelector("picture img"))?.src || null,
-            })) || []
-        ).catch(() => []);
+            }))
+          )
+          .catch(() => []);
 
         mapped = raw
           .map((it) => {
             const name = normalize(it.name);
-            const price =
-              parsePriceCLP(it.text) ?? pickPriceFromHtml(it.html);
+            const price = parsePriceCLP(it.text) ?? pickPriceFromHtml(it.html);
             return {
               store: "Cruz Verde",
               name,
@@ -173,7 +194,7 @@ export async function fetchCruzVerde(
       if (got.length >= 40) break;
     }
 
-    // De-dup por (name|price)
+    // De-dup (name|price)
     const seen = new Set();
     const dedup = [];
     for (const r of got) {
