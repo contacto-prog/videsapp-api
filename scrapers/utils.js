@@ -458,3 +458,82 @@ export async function setPageDefaults(page) {
     });
   } catch {}
 }
+// === Stealth-lite + helpers de retail (UA/idioma/webdriver/viewport/tz) ===
+export async function setPageDefaults(page) {
+  try {
+    await page.setUserAgent(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+    await page.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+      "Upgrade-Insecure-Requests": "1",
+    });
+    await page.emulateTimezone("America/Santiago");
+
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      window.chrome = window.chrome || {};
+      const permissions = navigator.permissions.query;
+      navigator.permissions.query = (parameters) =>
+        permissions(parameters).then((res) => {
+          if (parameters.name === "notifications") {
+            return Object.assign(res, { state: Notification.permission });
+          }
+          return res;
+        });
+      Object.defineProperty(navigator, "languages", { get: () => ["es-CL", "es", "en"] });
+      Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
+    });
+
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const t = req.resourceType();
+      if (t === "image" || t === "font" || t === "media") return req.abort();
+      return req.continue();
+    });
+  } catch {}
+}
+
+// Cierra banners de cookies y modales de región comunes (VTEX/SB/CV)
+export async function tryCloseRegionModal(page) {
+  try {
+    // Botones frecuentes
+    const labels = [
+      "Aceptar", "Acepto", "Entendido", "Continuar", "De acuerdo", "OK",
+      "Cerrar", "No gracias", "Lo tengo",
+      "Seleccionar", "Confirmar"
+    ];
+    // Selectores frecuentes VTEX de región/comuna
+    const sels = [
+      'button#onetrust-accept-btn-handler',
+      '#onetrust-accept-btn-handler',
+      'button[aria-label*="acept"]',
+      '[id*="cookie"] button',
+      '[class*="Modal"] button',
+      '[data-testid*="close"]',
+      '[aria-label="Cerrar"]',
+      'button[title="Cerrar"]',
+      'button[aria-label*="cerrar"]',
+      '[data-bind*="region"], [data-testid*="region"], [data-testid*="comuna"] button',
+    ];
+
+    // 1) Por texto
+    for (const t of labels) {
+      const btns = await page.$x(`//button[contains(translate(normalize-space(.),"ACEPTAROKCERRARSELECTCONFIRM","aceptarokcerrarselectconfirm"), "${t.toLowerCase()}")]`);
+      if (btns?.length) { await btns[0].click({ delay: 30 }).catch(()=>{}); await page.waitForTimeout(200); }
+    }
+    // 2) Por selector
+    for (const s of sels) {
+      const n = await page.$(s);
+      if (n) { await n.click({ delay: 30 }).catch(()=>{}); await page.waitForTimeout(200); }
+    }
+
+    // 3) Click en overlay si existe
+    const overlays = await page.$$('[role="dialog"], [class*="modal"], [class*="dialog"], .ReactModal__Overlay');
+    if (overlays?.length) {
+      await page.keyboard.press("Escape").catch(()=>{});
+      await page.waitForTimeout(200);
+    }
+  } catch {}
+}
