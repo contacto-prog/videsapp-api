@@ -8,16 +8,16 @@ import {
   pickPriceFromHtml,
   tryVtexSearch,
   pickCards,
+  setPageDefaults,         // 👈 importante
 } from "./utils.js";
 
 export const sourceId = "salcobrand";
 
 /**
  * Scraper Salcobrand (Chile)
- * Estrategia:
- *  1) Probar endpoints VTEX desde la home.
- *  2) Probar rutas de búsqueda visibles (DOM) con múltiples selectores.
- *  3) Fallback: patrón CLP sobre innerText/HTML si los selectores fallan.
+ *  1) VTEX desde home.
+ *  2) Búsqueda visible (DOM) con selectores.
+ *  3) Fallback: patrón CLP en innerText/HTML.
  */
 export async function fetchSalcobrand(
   q,
@@ -34,11 +34,23 @@ export async function fetchSalcobrand(
   let page;
   try {
     page = await browser.newPage();
+    await setPageDefaults(page);               // 👈 UA/idioma/viewport/webdriver off
 
     /* ========== 1) VTEX desde la home ========== */
     const homeOk = await safeGoto(page, "https://www.salcobrand.cl/", 25000);
     if (homeOk) {
       await tryDismissCookieBanners(page);
+      await page.waitForTimeout(1200);
+      await page
+        .waitForResponse(
+          r =>
+            /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(
+              r.url()
+            ),
+          { timeout: 5000 }
+        )
+        .catch(() => {});
+
       const vtex = await tryVtexSearch(page, q, (p) => p);
       if (Array.isArray(vtex) && vtex.length) {
         const seen = new Set();
@@ -54,7 +66,7 @@ export async function fetchSalcobrand(
             store: "Salcobrand",
             name,
             price,
-            img: null,         // esta vía no trae imagen directa
+            img: null,
             url: it.url || null,
             stock: true,
           });
@@ -66,20 +78,16 @@ export async function fetchSalcobrand(
 
     /* ========== 2) Búsqueda visible (DOM) ========== */
     const searchUrls = [
-      // VTEX típicos
       `https://www.salcobrand.cl/search?q=${encodeURIComponent(q)}`,
       `https://www.salcobrand.cl/${encodeURIComponent(q)}?map=ft`,
       `https://www.salcobrand.cl/busca?q=${encodeURIComponent(q)}`,
-      // Magento clásico (por si cae en legacy)
       `https://www.salcobrand.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`,
     ];
 
     const cardsSelectors = {
       cards: [
-        // VTEX
         ".vtex-search-result-3-x-galleryItem",
         ".vtex-product-summary-2-x-container",
-        // Magento / genéricos
         ".product-item",
         ".product-item-info",
         "li.product",
@@ -87,31 +95,23 @@ export async function fetchSalcobrand(
         ".shelf__item",
       ].join(","),
       name: [
-        // VTEX
         ".vtex-product-summary-2-x-productBrand",
         ".vtex-product-summary-2-x-productName",
-        // Magento
         ".product-item-link",
         ".product-item-name a",
-        "a.product-item-link",
-        // genéricos
         ".product-card__title",
         ".card__heading",
         ".product-title",
         "a[title]",
       ],
       price: [
-        // VTEX
         ".vtex-product-price-1-x-sellingPriceValue",
         ".vtex-product-price-1-x-currencyInteger",
         ".best-price",
-        // Magento / genéricos
         ".price, .product-price, .price__current, .amount, [data-price], [itemprop='price']",
       ],
       link: [
-        // VTEX
         "a.vtex-product-summary-2-x-clearLink",
-        // Magento / genéricos
         "a.product-item-link",
         "a[href*='/p']",
         ".card__heading a",
@@ -125,10 +125,21 @@ export async function fetchSalcobrand(
       if (!ok) continue;
 
       await tryDismissCookieBanners(page);
+      await page.waitForTimeout(1500);         // 👈 deja cargar grilla/precios
       await autoScroll(page, { steps: 8, delay: 250 });
       await page.waitForTimeout(800);
 
-      // 1) Intento con selectores (pickCards ya normaliza precio)
+      await page
+        .waitForResponse(
+          r =>
+            /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(
+              r.url()
+            ),
+          { timeout: 5000 }
+        )
+        .catch(() => {});
+
+      // 1) Selectores
       let picked = await pickCards(page, cardsSelectors);
       let mapped = (picked || []).map((r) => ({
         store: "Salcobrand",
@@ -139,11 +150,10 @@ export async function fetchSalcobrand(
         stock: true,
       }));
 
-      // 2) Fallback agresivo por patrón CLP
+      // 2) Fallback por patrón CLP
       if (!mapped.length) {
-        const raw = await page.$$eval(
-          cardsSelectors.cards,
-          (nodes) =>
+        const raw = await page
+          .$$eval(cardsSelectors.cards, (nodes) =>
             nodes.map((card) => ({
               text: (card.innerText || card.textContent || "").trim(),
               html: card.outerHTML || "",
@@ -165,14 +175,14 @@ export async function fetchSalcobrand(
               img:
                 (card.querySelector("img") ||
                   card.querySelector("picture img"))?.src || null,
-            })) || []
-        ).catch(() => []);
+            }))
+          )
+          .catch(() => []);
 
         mapped = raw
           .map((it) => {
             const name = normalize(it.name);
-            const price =
-              parsePriceCLP(it.text) ?? pickPriceFromHtml(it.html);
+            const price = parsePriceCLP(it.text) ?? pickPriceFromHtml(it.html);
             return {
               store: "Salcobrand",
               name,
@@ -189,7 +199,7 @@ export async function fetchSalcobrand(
       if (all.length >= 40) break;
     }
 
-    // De-dup por (name|price)
+    // De-dup (name|price)
     const seen = new Set();
     const dedup = [];
     for (const r of all) {
