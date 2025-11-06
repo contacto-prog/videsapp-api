@@ -2,13 +2,11 @@
 export const sourceId = "cruzverde";
 
 /**
- * Puedes forzar la zona vía:
- *  - options.inventoryId / options.inventoryZone
- *  - o variables de entorno: CV_INVENTORY_ID / CV_INVENTORY_ZONE
+ * Scraper Cruz Verde (Chile) usando Intelligent Search API (VTEX)
  */
 export async function fetchCruzVerde(
   q,
-  { puppeteer, headless = "new", executablePath, inventoryId, inventoryZone } = {}
+  { puppeteer, headless = "new", executablePath } = {}
 ) {
   if (!puppeteer) throw new Error("fetchCruzVerde requiere puppeteer en opts");
 
@@ -24,92 +22,50 @@ export async function fetchCruzVerde(
     await page.setUserAgent(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
-    await page.setExtraHTTPHeaders({ "Accept-Language": "es-CL,es;q=0.9,en;q=0.8" });
-
-    // 1) tocar la home para tener cookies/sesión
-    await page.goto("https://www.cruzverde.cl/", { waitUntil: "domcontentloaded", timeout: 25000 }).catch(()=>{});
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+    });
 
     const query = String(q || "").trim();
     if (!query) return [];
 
-    // 2) lee override desde env/params (si no, la página intentará usar localStorage/cookies)
-    const OV_INV  = process.env.CV_INVENTORY_ID   || inventoryId   || null;
-    const OV_ZONE = process.env.CV_INVENTORY_ZONE || inventoryZone || null;
+    const items = await page.evaluate(async (q) => {
+      const endpoint = `https://www.cruzverde.cl/_v/api/intelligent-search/product_search/v1/?ft=${encodeURIComponent(q)}&_from=0&_to=40`;
 
-    const items = await page.evaluate(async (q, ovInv, ovZone) => {
-      const lsGet = (k) => { try { return localStorage.getItem(k) || null; } catch { return null; } };
-      const ckGet = (k) => { const m = document.cookie.match(new RegExp(`(?:^|; )${k}=([^;]+)`)); return m ? decodeURIComponent(m[1]) : null; };
+      const res = await fetch(endpoint);
+      if (!res.ok) return [];
+      const data = await res.json();
 
-      let inventoryId   = ovInv  || lsGet("inventoryId")   || ckGet("inventoryId");
-      let inventoryZone = ovZone || lsGet("inventoryZone") || ckGet("inventoryZone");
+      if (!data?.hits?.length) return [];
 
-      // último fallback duro (si no hay nada)
-      if (!inventoryId || !inventoryZone) {
-        inventoryId   = "Zonapañales1119";
-        inventoryZone = "Zonapañales1119";
-      }
-
-      const base = "https://api.cruzverde.cl/product-service/products/search";
-      const mkUrl = (params) => {
-        const usp = new URLSearchParams({
-          limit: "40",
-          offset: "0",
-          sort: "",
-          q,
-          isAndes: "true",
-          ...params,
+      const out = [];
+      for (const hit of data.hits) {
+        const name = hit?.productName || hit?.productTitle || "";
+        const price = hit?.items?.[0]?.sellers?.[0]?.commertialOffer?.Price ?? null;
+        const url = hit?.linkText
+          ? `https://www.cruzverde.cl/${hit.linkText}/p`
+          : null;
+        if (!name || !Number.isFinite(price)) continue;
+        out.push({
+          store: "Cruz Verde",
+          name,
+          price: Math.round(price),
+          url,
+          stock: true,
         });
-        return `${base}?${usp.toString()}`;
-      };
-
-      const urls = [
-        mkUrl({ inventoryId, inventoryZone }), // preferida (con zona)
-        mkUrl({}),                             // sin zona, por si acaso
-      ];
-
-      const fetchJson = async (u) => {
-        try {
-          const r = await fetch(u, { credentials: "include" });
-          if (!r.ok && r.status !== 304) return null;
-          return await r.json();
-        } catch { return null; }
-      };
-
-      const mapProducts = (data) => {
-        const products = Array.isArray(data?.products) ? data.products : [];
-        const out = [];
-        for (const p of products) {
-          const name  = p?.name || p?.productName || "";
-          const price = (p?.price?.price ?? p?.price?.basePrice ?? null);
-          const link  = p?.url ? `https://www.cruzverde.cl${p.url}` : null;
-          if (!name || !Number.isFinite(price)) continue;
-          out.push({
-            store: "Cruz Verde",
-            name,
-            price: Math.round(Number(price)),
-            url: link,
-            img: p?.imageUrl || null,
-            stock: (p?.stock ?? 1) > 0,
-          });
-          if (out.length >= 60) break;
-        }
-        return out;
-      };
-
-      for (const u of urls) {
-        const j = await fetchJson(u);
-        const rows = mapProducts(j);
-        if (rows.length) return rows;
+        if (out.length >= 60) break;
       }
-      return [];
-    }, query, OV_INV, OV_ZONE);
+      return out;
+    }, query);
 
     return Array.isArray(items) ? items : [];
   } catch (err) {
     console.error("[CruzVerde] scraper error:", err?.message || err);
     return [];
   } finally {
-    try { await page?.close(); } catch {}
-    await browser.close().catch(()=>{});
+    try {
+      await page?.close();
+    } catch {}
+    await browser.close().catch(() => {});
   }
 }
