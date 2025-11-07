@@ -23,99 +23,121 @@ export async function fetchCruzVerde(
 
   let page;
   try {
-    page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
-    await page.setExtraHTTPHeaders({ "Accept-Language": "es-CL,es;q=0.9,en;q=0.8" });
-
     const query = String(q || "").trim();
     if (!query) return [];
 
+    page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ "Accept-Language": "es-CL,es;q=0.9,en;q=0.8" });
+    await page.setUserAgent(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+
     const searchUrl = `https://www.cruzverde.cl/search?query=${encodeURIComponent(query)}`;
 
-    // --- 1) Escuchar la respuesta XHR de Intelligent Search mientras navegamos ---
-    const collected = [];
-    const mapHits = (data) => {
-      const hits = Array.isArray(data?.hits) ? data.hits : [];
-      for (const h of hits) {
-        const name =
-          h?.productName || h?.productTitle || h?.productNameWithTag || "";
-        const price =
-          h?.items?.[0]?.sellers?.[0]?.commertialOffer?.Price ?? null;
-        const url = h?.linkText
-          ? `https://www.cruzverde.cl/${h.linkText}/p`
-          : null;
-        if (name && Number.isFinite(price)) {
-          collected.push({
-            store: "Cruz Verde",
-            name,
-            price: Math.round(price),
-            url,
-            stock: true,
-          });
-        }
-        if (collected.length >= 60) break;
-      }
-    };
+    const items = [];
 
+    // Captura XHR de SFCC (product_search_result)
     page.on("response", async (res) => {
       try {
         const url = res.url();
-        if (
-          url.includes("/_v/api/intelligent-search/product_search") &&
-          res.ok()
-        ) {
-          const json = await res.json().catch(() => null);
-          if (json) mapHits(json);
+        if (!res.ok()) return;
+
+        // Candidatos: wrapper propio y llamadas SFCC
+        const looksLikeSearch =
+          url.includes("/product-service/products/search") ||
+          url.includes("/dw/shop/") ||
+          url.includes("product_search");
+
+        if (!looksLikeSearch) return;
+
+        const data = await res
+          .json()
+          .catch(() => null);
+
+        if (!data || data.type !== "product_search_result" || !Array.isArray(data.hits)) {
+          return;
+        }
+
+        for (const h of data.hits) {
+          const name = normalize(h?.productName || "");
+          const prices = h?.prices || {};
+          const price =
+            Number(prices["price-sale-cl"]) ||
+            Number(prices["price-list-cl"]) ||
+            null;
+
+          const urlOut =
+            typeof h?.link === "string" && h.link ? h.link : null;
+
+          if (name && Number.isFinite(price)) {
+            items.push({
+              store: "Cruz Verde",
+              name,
+              price: Math.round(price),
+              url: urlOut,
+              stock: typeof h?.stock === "number" ? h.stock > 0 : true,
+            });
+          }
+          if (items.length >= 60) break;
         }
       } catch {}
     });
 
+    // Ir a resultados y dar tiempo a que caigan los XHR
     await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
     await tryDismissCookieBanners(page).catch(() => {});
-    await autoScroll(page, { steps: 10, delay: 250 });
+    await autoScroll(page, { steps: 8, delay: 250 });
 
-    // Espera hasta que llegue el XHR (máx 6s) con polling corto
+    // Pequeña espera para que se resuelvan los XHR
     const t0 = Date.now();
-    while (Date.now() - t0 < 6000 && collected.length === 0) {
-      await page.waitForTimeout(250);
+    while (Date.now() - t0 < 5000 && items.length === 0) {
+      await page.waitForTimeout(200);
     }
-    if (collected.length) return collected;
+    if (items.length) {
+      // Dedup por (name|price|url)
+      const seen = new Set();
+      const out = [];
+      for (const it of items) {
+        const k = `${it.name}|${it.price}|${it.url || ""}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          out.push(it);
+        }
+        if (out.length >= 60) break;
+      }
+      return out;
+    }
 
-    // --- 2) Fallback DOM (si el XHR no se capturó por cualquier razón) ---
+    // === Fallback DOM (por si el XHR no se pudo leer) ===
     const cardsSelectors = {
       cards: [
+        ".product-card",
         ".vtex-search-result-3-x-galleryItem",
         ".vtex-product-summary-2-x-container",
-        ".product-item",
-        ".product-card",
         "li.product",
         ".shelf__item",
       ].join(","),
       name: [
-        ".vtex-product-summary-2-x-productBrand",
-        ".vtex-product-summary-2-x-productName",
-        ".product-item-link",
         ".product-card__title",
+        ".vtex-product-summary-2-x-productName",
+        ".vtex-product-summary-2-x-productBrand",
+        ".product-item-link",
         "a[title]",
       ],
       price: [
+        ".product-price",
+        ".price",
+        ".best-price",
         ".vtex-product-price-1-x-sellingPriceValue",
         ".vtex-product-price-1-x-currencyInteger",
-        ".best-price",
-        ".price",
-        ".product-price",
       ],
       link: [
-        "a.vtex-product-summary-2-x-clearLink",
         "a.product-item-link",
         "a[href*='/p']",
         "a[href^='/']",
       ],
     };
 
-    // 2.a) Intento con selectores (pickCards ya intenta normalizar)
     let picked = await pickCards(page, cardsSelectors);
     let mapped = (picked || []).map((r) => ({
       store: "Cruz Verde",
@@ -125,29 +147,25 @@ export async function fetchCruzVerde(
       stock: true,
     }));
 
-    // 2.b) Fallback agresivo: leer innerText/HTML y parsear precio a mano
     if (!mapped.length) {
-      const raw = await page
-        .$$eval(
-          cardsSelectors.cards,
-          (nodes) =>
-            nodes.map((card) => ({
-              text: (card.innerText || card.textContent || "").trim(),
-              html: card.outerHTML || "",
-              name:
-                (card.querySelector(".vtex-product-summary-2-x-productBrand") ||
-                  card.querySelector(".vtex-product-summary-2-x-productName") ||
-                  card.querySelector(".product-item-link") ||
-                  card.querySelector(".product-card__title") ||
-                  card.querySelector("a[title]"))?.textContent?.trim() || null,
-              href:
-                (card.querySelector("a.vtex-product-summary-2-x-clearLink") ||
-                  card.querySelector("a.product-item-link") ||
-                  card.querySelector("a[href*='/p']") ||
-                  card.querySelector("a[href^='/']"))?.href || null,
-            })) || []
-        )
-        .catch(() => []);
+      const raw = await page.$$eval(
+        cardsSelectors.cards,
+        (nodes) =>
+          nodes.map((card) => ({
+            text: (card.innerText || card.textContent || "").trim(),
+            html: card.outerHTML || "",
+            name:
+              (card.querySelector(".product-card__title") ||
+                card.querySelector(".vtex-product-summary-2-x-productName") ||
+                card.querySelector(".vtex-product-summary-2-x-productBrand") ||
+                card.querySelector(".product-item-link") ||
+                card.querySelector("a[title]"))?.textContent?.trim() || null,
+            href:
+              (card.querySelector("a.product-item-link") ||
+                card.querySelector("a[href*='/p']") ||
+                card.querySelector("a[href^='/']"))?.href || null,
+          })) || []
+      ).catch(() => []);
 
       mapped = raw
         .map((it) => {
@@ -164,7 +182,6 @@ export async function fetchCruzVerde(
         .filter((x) => x.name && Number.isFinite(x.price) && x.price > 0);
     }
 
-    // De-dup y límite
     const seen = new Set();
     const dedup = [];
     for (const r of mapped) {
@@ -175,9 +192,12 @@ export async function fetchCruzVerde(
       }
       if (dedup.length >= 60) break;
     }
+
     return dedup;
-  } catch (err) {
-    console.error("[CruzVerde] scraper error:", err?.message || err);
+  } catch (e) {
+    if (process.env.DEBUG_PRICES) {
+      console.error("[CruzVerde] scraper error:", e?.message || e);
+    }
     return [];
   } finally {
     try { await page?.close(); } catch {}
