@@ -5,6 +5,8 @@ import {
   pickCards,
   normalize,
   pickPriceFromText,
+  setPageDefaults,
+  safeGoto,
 } from "./utils.js";
 
 export const sourceId = "cruzverde";
@@ -27,13 +29,10 @@ export async function fetchCruzVerde(
     if (!query) return [];
 
     page = await browser.newPage();
-    await page.setExtraHTTPHeaders({ "Accept-Language": "es-CL,es;q=0.9,en;q=0.8" });
-    await page.setUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
+        await setPageDefaults(page);
 
     // 1) Ir al sitio (CORS/cookies) y dar chance a banners
-    await page.goto("https://www.cruzverde.cl/", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await safeGoto(page, "https://www.cruzverde.cl/", 30000);
     await tryDismissCookieBanners(page).catch(() => {});
     await autoScroll(page, { steps: 4, delay: 150 });
 
@@ -59,75 +58,7 @@ export async function fetchCruzVerde(
                 url: urlPdp,
                 stock: typeof h?.stock === "number" ? h.stock > 0 : true,
               });
-            }
-            if (out.length >= 60) break;
-          }
-          return out;
-        }
-        return null;
-      } catch {
-        return null;
-      }
-    }, query);
-
-    if (Array.isArray(sfcc) && sfcc.length) {
-      // de-dup
-      const seen = new Set();
-      const out = [];
-      for (const it of sfcc) {
-        const k = `${it.name}|${it.price}|${it.url || ""}`;
-        if (!seen.has(k)) {
-          seen.add(k);
-          out.push(it);
-        }
-        if (out.length >= 60) break;
-      }
-      return out;
-    }
-
-    // 3) SEGUNDO INTENTO: API interna product-service (por si SFCC falla)
-    const svc = await page.evaluate(async (qStr) => {
-      // Tomar inventario si existe en localStorage
-      let inventoryId = null, inventoryZone = null;
-      try {
-        inventoryId = localStorage.getItem("inventoryId") || null;
-        inventoryZone = localStorage.getItem("inventoryZone") || null;
-      } catch {}
-      const params = new URLSearchParams({
-        limit: "24",
-        offset: "0",
-        sort: "",
-        q: qStr,
-        isAndes: "true",
-      });
-      if (inventoryId)  params.set("inventoryId",  inventoryId);
-      if (inventoryZone) params.set("inventoryZone", inventoryZone);
-      const url = `https://api.cruzverde.cl/product-service/products/search?${params.toString()}`;
-
-      try {
-        const r = await fetch(url, { credentials: "include" });
-        if (!r.ok) return null;
-        const j = await r.json().catch(() => null);
-        // No conocemos el shape exacto aquí; intentamos mapping flexible
-        const take = [];
-        const arr = Array.isArray(j?.products) ? j.products
-                  : Array.isArray(j?.items)    ? j.items
-                  : Array.isArray(j)           ? j
-                  : [];
-        for (const it of arr) {
-          const name = (it?.name || it?.productName || "").trim();
-          const price =
-            Number(it?.price?.sale ?? it?.price?.list ?? it?.finalPrice ?? it?.salePrice ?? it?.price) ||
-            Number(it?.prices?.["price-sale-cl"] ?? it?.prices?.["price-list-cl"]) || null;
-          const urlPdp = it?.url || it?.link || null;
-          if (name && Number.isFinite(price)) {
-            take.push({
-              store: "Cruz Verde",
-              name,
-              price: Math.round(price),
-              url: urlPdp,
-              stock: typeof it?.stock === "number" ? it.stock > 0 : true,
-            });
+@@ -131,107 +130,134 @@ export async function fetchCruzVerde(
           }
           if (take.length >= 60) break;
         }
@@ -154,8 +85,25 @@ export async function fetchCruzVerde(
     // 4) ÚLTIMO RECURSO: DOM
     const searchUrl = `https://www.cruzverde.cl/search?query=${encodeURIComponent(query)}`;
     await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await safeGoto(page, searchUrl, 30000);
     await tryDismissCookieBanners(page).catch(() => {});
+    await page.waitForTimeout(1200);
     await autoScroll(page, { steps: 8, delay: 200 });
+    await page.waitForResponse(
+      (r) => /product-service\/products\/search|dw\/shop\//i.test(r.url()),
+      { timeout: 8000 }
+    ).catch(() => {});
+    await page
+      .waitForSelector(
+        [
+          ".product-card",
+          "[data-testid='product-card']",
+          "[class*='ProductCard']",
+          ".vtex-search-result-3-x-galleryItem",
+        ].join(","),
+        { timeout: 12000 }
+      )
+      .catch(() => {});
 
     const cardsSelectors = {
       cards: [
@@ -164,6 +112,8 @@ export async function fetchCruzVerde(
         ".vtex-product-summary-2-x-container",
         "li.product",
         ".shelf__item",
+        "[data-testid='product-card']",
+        "[class*='ProductCard']",
       ].join(","),
       name: [
         ".product-card__title",
@@ -171,6 +121,8 @@ export async function fetchCruzVerde(
         ".vtex-product-summary-2-x-productBrand",
         ".product-item-link",
         "a[title]",
+        "[data-testid='product-card-name']",
+        "[class*='ProductCard'] [class*='Title']",
       ],
       price: [
         ".product-price",
@@ -178,11 +130,15 @@ export async function fetchCruzVerde(
         ".best-price",
         ".vtex-product-price-1-x-sellingPriceValue",
         ".vtex-product-price-1-x-currencyInteger",
+        "[data-testid='price']",
+        "[data-testid*='Price']",
+        "[class*='price']",
       ],
       link: [
         "a.product-item-link",
         "a[href*='/p']",
         "a[href^='/']",
+        "[data-testid='product-card'] a",
       ],
     };
 
@@ -207,9 +163,12 @@ export async function fetchCruzVerde(
                 card.querySelector(".vtex-product-summary-2-x-productName") ||
                 card.querySelector(".vtex-product-summary-2-x-productBrand") ||
                 card.querySelector(".product-item-link") ||
-                card.querySelector("a[title]"))?.textContent?.trim() || null,
+                              card.querySelector("a[title]") ||
+                card.querySelector("[data-testid='product-card-name']") ||
+                card.querySelector("[class*='ProductCard'] [class*='Title']"))?.textContent?.trim() || null,
             href:
               (card.querySelector("a.product-item-link") ||
+                card.querySelector("[data-testid='product-card'] a") ||
                 card.querySelector("a[href*='/p']") ||
                 card.querySelector("a[href^='/']"))?.href || null,
           })) || []
@@ -235,20 +194,3 @@ export async function fetchCruzVerde(
     for (const r of mapped) {
       const key = `${r.name}|${r.price}|${r.url || ""}`;
       if (!seen.has(key)) {
-        seen.add(key);
-        dedup.push(r);
-      }
-      if (dedup.length >= 60) break;
-    }
-
-    return dedup;
-  } catch (e) {
-    if (process.env.DEBUG_PRICES) {
-      console.error("[CruzVerde] scraper error:", e?.message || e);
-    }
-    return [];
-  } finally {
-    try { await page?.close(); } catch {}
-    await browser.close().catch(() => {});
-  }
-}
