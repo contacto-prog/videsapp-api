@@ -32,72 +32,49 @@ export async function fetchCruzVerde(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
-    const searchUrl = `https://www.cruzverde.cl/search?query=${encodeURIComponent(query)}`;
-
-    const items = [];
-
-    // Captura XHR de SFCC (product_search_result)
-    page.on("response", async (res) => {
-      try {
-        const url = res.url();
-        if (!res.ok()) return;
-
-        // Candidatos: wrapper propio y llamadas SFCC
-        const looksLikeSearch =
-          url.includes("/product-service/products/search") ||
-          url.includes("/dw/shop/") ||
-          url.includes("product_search");
-
-        if (!looksLikeSearch) return;
-
-        const data = await res
-          .json()
-          .catch(() => null);
-
-        if (!data || data.type !== "product_search_result" || !Array.isArray(data.hits)) {
-          return;
-        }
-
-        for (const h of data.hits) {
-          const name = normalize(h?.productName || "");
-          const prices = h?.prices || {};
-          const price =
-            Number(prices["price-sale-cl"]) ||
-            Number(prices["price-list-cl"]) ||
-            null;
-
-          const urlOut =
-            typeof h?.link === "string" && h.link ? h.link : null;
-
-          if (name && Number.isFinite(price)) {
-            items.push({
-              store: "Cruz Verde",
-              name,
-              price: Math.round(price),
-              url: urlOut,
-              stock: typeof h?.stock === "number" ? h.stock > 0 : true,
-            });
-          }
-          if (items.length >= 60) break;
-        }
-      } catch {}
-    });
-
-    // Ir a resultados y dar tiempo a que caigan los XHR
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    // 1) Ir al sitio (CORS/cookies) y dar chance a banners
+    await page.goto("https://www.cruzverde.cl/", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
     await tryDismissCookieBanners(page).catch(() => {});
-    await autoScroll(page, { steps: 8, delay: 250 });
+    await autoScroll(page, { steps: 4, delay: 150 });
 
-    // Pequeña espera para que se resuelvan los XHR
-    const t0 = Date.now();
-    while (Date.now() - t0 < 5000 && items.length === 0) {
-      await page.waitForTimeout(200);
-    }
-    if (items.length) {
-      // Dedup por (name|price|url)
+    // 2) INTENTO PRINCIPAL: SFCC Open Commerce API (lo mismo que viste en Preview)
+    const sfcc = await page.evaluate(async (qStr) => {
+      const url = `https://www.cruzverde.cl/s/Chile/dw/shop/v19_1/product_search?q=${encodeURIComponent(qStr)}&start=0&count=24`;
+      try {
+        const r = await fetch(url, { credentials: "include" });
+        if (!r.ok) return null;
+        const j = await r.json();
+        if (j && j.type === "product_search_result" && Array.isArray(j.hits)) {
+          const out = [];
+          for (const h of j.hits) {
+            const name = (h?.productName || "").trim();
+            const prices = h?.prices || {};
+            const price = Number(prices["price-sale-cl"] ?? prices["price-list-cl"]);
+            const urlPdp = typeof h?.link === "string" ? h.link : null;
+            if (name && Number.isFinite(price)) {
+              out.push({
+                store: "Cruz Verde",
+                name,
+                price: Math.round(price),
+                url: urlPdp,
+                stock: typeof h?.stock === "number" ? h.stock > 0 : true,
+              });
+            }
+            if (out.length >= 60) break;
+          }
+          return out;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    }, query);
+
+    if (Array.isArray(sfcc) && sfcc.length) {
+      // de-dup
       const seen = new Set();
       const out = [];
-      for (const it of items) {
+      for (const it of sfcc) {
         const k = `${it.name}|${it.price}|${it.url || ""}`;
         if (!seen.has(k)) {
           seen.add(k);
@@ -108,7 +85,78 @@ export async function fetchCruzVerde(
       return out;
     }
 
-    // === Fallback DOM (por si el XHR no se pudo leer) ===
+    // 3) SEGUNDO INTENTO: API interna product-service (por si SFCC falla)
+    const svc = await page.evaluate(async (qStr) => {
+      // Tomar inventario si existe en localStorage
+      let inventoryId = null, inventoryZone = null;
+      try {
+        inventoryId = localStorage.getItem("inventoryId") || null;
+        inventoryZone = localStorage.getItem("inventoryZone") || null;
+      } catch {}
+      const params = new URLSearchParams({
+        limit: "24",
+        offset: "0",
+        sort: "",
+        q: qStr,
+        isAndes: "true",
+      });
+      if (inventoryId)  params.set("inventoryId",  inventoryId);
+      if (inventoryZone) params.set("inventoryZone", inventoryZone);
+      const url = `https://api.cruzverde.cl/product-service/products/search?${params.toString()}`;
+
+      try {
+        const r = await fetch(url, { credentials: "include" });
+        if (!r.ok) return null;
+        const j = await r.json().catch(() => null);
+        // No conocemos el shape exacto aquí; intentamos mapping flexible
+        const take = [];
+        const arr = Array.isArray(j?.products) ? j.products
+                  : Array.isArray(j?.items)    ? j.items
+                  : Array.isArray(j)           ? j
+                  : [];
+        for (const it of arr) {
+          const name = (it?.name || it?.productName || "").trim();
+          const price =
+            Number(it?.price?.sale ?? it?.price?.list ?? it?.finalPrice ?? it?.salePrice ?? it?.price) ||
+            Number(it?.prices?.["price-sale-cl"] ?? it?.prices?.["price-list-cl"]) || null;
+          const urlPdp = it?.url || it?.link || null;
+          if (name && Number.isFinite(price)) {
+            take.push({
+              store: "Cruz Verde",
+              name,
+              price: Math.round(price),
+              url: urlPdp,
+              stock: typeof it?.stock === "number" ? it.stock > 0 : true,
+            });
+          }
+          if (take.length >= 60) break;
+        }
+        return take.length ? take : null;
+      } catch {
+        return null;
+      }
+    }, query);
+
+    if (Array.isArray(svc) && svc.length) {
+      const seen = new Set();
+      const out = [];
+      for (const it of svc) {
+        const k = `${it.name}|${it.price}|${it.url || ""}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          out.push(it);
+        }
+        if (out.length >= 60) break;
+      }
+      return out;
+    }
+
+    // 4) ÚLTIMO RECURSO: DOM
+    const searchUrl = `https://www.cruzverde.cl/search?query=${encodeURIComponent(query)}`;
+    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await tryDismissCookieBanners(page).catch(() => {});
+    await autoScroll(page, { steps: 8, delay: 200 });
+
     const cardsSelectors = {
       cards: [
         ".product-card",
