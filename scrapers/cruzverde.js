@@ -1,4 +1,12 @@
 // scrapers/cruzverde.js
+import {
+  tryDismissCookieBanners,
+  autoScroll,
+  pickCards,
+  normalize,
+  pickPriceFromText,
+} from "./utils.js";
+
 export const sourceId = "cruzverde";
 
 export async function fetchCruzVerde(
@@ -24,73 +32,150 @@ export async function fetchCruzVerde(
     const query = String(q || "").trim();
     if (!query) return [];
 
-    // 1) Ir a la página de búsqueda (misma ORIGEN)
     const searchUrl = `https://www.cruzverde.cl/search?query=${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-    await page.waitForSelector("body", { timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(800);
 
-    // 2) Intento 1: Intelligent Search API (desde mismo origen)
-    const apiItems = await page.evaluate(async (q) => {
+    // --- 1) Escuchar la respuesta XHR de Intelligent Search mientras navegamos ---
+    const collected = [];
+    const mapHits = (data) => {
+      const hits = Array.isArray(data?.hits) ? data.hits : [];
+      for (const h of hits) {
+        const name =
+          h?.productName || h?.productTitle || h?.productNameWithTag || "";
+        const price =
+          h?.items?.[0]?.sellers?.[0]?.commertialOffer?.Price ?? null;
+        const url = h?.linkText
+          ? `https://www.cruzverde.cl/${h.linkText}/p`
+          : null;
+        if (name && Number.isFinite(price)) {
+          collected.push({
+            store: "Cruz Verde",
+            name,
+            price: Math.round(price),
+            url,
+            stock: true,
+          });
+        }
+        if (collected.length >= 60) break;
+      }
+    };
+
+    page.on("response", async (res) => {
       try {
-        const url = `https://www.cruzverde.cl/_v/api/intelligent-search/product_search/v1/?ft=${encodeURIComponent(q)}&_from=0&_to=40`;
-        const res = await fetch(url, { credentials: "include" });
-        if (!res.ok) return [];
-        const data = await res.json();
-
-        // Respuesta tipo { v, type: "product_search_result", hits: [...] }
-        const hits = Array.isArray(data?.hits) ? data.hits : [];
-        const out = [];
-        for (const h of hits) {
-          const name  = h?.productName || h?.productTitle || "";
-          const price = h?.items?.[0]?.sellers?.[0]?.commertialOffer?.Price ?? null;
-          const urlp  = h?.linkText ? `https://www.cruzverde.cl/${h.linkText}/p` : null;
-          if (!name || !Number.isFinite(price)) continue;
-          out.push({ store: "Cruz Verde", name, price: Math.round(price), url: urlp, stock: true });
-          if (out.length >= 60) break;
+        const url = res.url();
+        if (
+          url.includes("/_v/api/intelligent-search/product_search") &&
+          res.ok()
+        ) {
+          const json = await res.json().catch(() => null);
+          if (json) mapHits(json);
         }
-        return out;
-      } catch { return []; }
-    }, query);
-
-    if (Array.isArray(apiItems) && apiItems.length) return apiItems;
-
-    // 3) Intento 2: __STATE__ embebido en la página
-    const stateItems = await page.evaluate(() => {
-      try {
-        const w = window;
-        let state = null;
-        if (w && w.__STATE__) state = w.__STATE__;
-        if (!state) {
-          const scripts = Array.from(document.querySelectorAll("script"));
-          for (const s of scripts) {
-            const t = s.textContent || "";
-            if (t.includes("__STATE__")) {
-              try { state = eval("(" + t + ")").__STATE__; } catch {}
-              if (state) break;
-            }
-          }
-        }
-        if (!state) return [];
-
-        const out = [];
-        const asText = JSON.stringify(state);
-        // Buscar pares nombre/precio dentro del estado
-        const re = /"commertialOffer"\s*:\s*\{[^}]*"Price"\s*:\s*([0-9.]+)[^}]*\}[^}]*\}[^}]*"name"\s*:\s*"([^"]+)"/gi;
-        let m;
-        while ((m = re.exec(asText))) {
-          const price = Math.round(Number(m[1]));
-          const name  = m[2];
-          if (name && Number.isFinite(price)) {
-            out.push({ store: "Cruz Verde", name, price, url: null, stock: true });
-          }
-          if (out.length >= 60) break;
-        }
-        return out;
-      } catch { return []; }
+      } catch {}
     });
 
-    return Array.isArray(stateItems) ? stateItems : [];
+    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await tryDismissCookieBanners(page).catch(() => {});
+    await autoScroll(page, { steps: 10, delay: 250 });
+
+    // Espera hasta que llegue el XHR (máx 6s) con polling corto
+    const t0 = Date.now();
+    while (Date.now() - t0 < 6000 && collected.length === 0) {
+      await page.waitForTimeout(250);
+    }
+    if (collected.length) return collected;
+
+    // --- 2) Fallback DOM (si el XHR no se capturó por cualquier razón) ---
+    const cardsSelectors = {
+      cards: [
+        ".vtex-search-result-3-x-galleryItem",
+        ".vtex-product-summary-2-x-container",
+        ".product-item",
+        ".product-card",
+        "li.product",
+        ".shelf__item",
+      ].join(","),
+      name: [
+        ".vtex-product-summary-2-x-productBrand",
+        ".vtex-product-summary-2-x-productName",
+        ".product-item-link",
+        ".product-card__title",
+        "a[title]",
+      ],
+      price: [
+        ".vtex-product-price-1-x-sellingPriceValue",
+        ".vtex-product-price-1-x-currencyInteger",
+        ".best-price",
+        ".price",
+        ".product-price",
+      ],
+      link: [
+        "a.vtex-product-summary-2-x-clearLink",
+        "a.product-item-link",
+        "a[href*='/p']",
+        "a[href^='/']",
+      ],
+    };
+
+    // 2.a) Intento con selectores (pickCards ya intenta normalizar)
+    let picked = await pickCards(page, cardsSelectors);
+    let mapped = (picked || []).map((r) => ({
+      store: "Cruz Verde",
+      name: normalize(r.name),
+      price: r.price,
+      url: r.link || null,
+      stock: true,
+    }));
+
+    // 2.b) Fallback agresivo: leer innerText/HTML y parsear precio a mano
+    if (!mapped.length) {
+      const raw = await page
+        .$$eval(
+          cardsSelectors.cards,
+          (nodes) =>
+            nodes.map((card) => ({
+              text: (card.innerText || card.textContent || "").trim(),
+              html: card.outerHTML || "",
+              name:
+                (card.querySelector(".vtex-product-summary-2-x-productBrand") ||
+                  card.querySelector(".vtex-product-summary-2-x-productName") ||
+                  card.querySelector(".product-item-link") ||
+                  card.querySelector(".product-card__title") ||
+                  card.querySelector("a[title]"))?.textContent?.trim() || null,
+              href:
+                (card.querySelector("a.vtex-product-summary-2-x-clearLink") ||
+                  card.querySelector("a.product-item-link") ||
+                  card.querySelector("a[href*='/p']") ||
+                  card.querySelector("a[href^='/']"))?.href || null,
+            })) || []
+        )
+        .catch(() => []);
+
+      mapped = raw
+        .map((it) => {
+          const name = normalize(it.name);
+          const price = pickPriceFromText(it.text) || pickPriceFromText(it.html);
+          return {
+            store: "Cruz Verde",
+            name,
+            price: price ?? null,
+            url: it.href || null,
+            stock: true,
+          };
+        })
+        .filter((x) => x.name && Number.isFinite(x.price) && x.price > 0);
+    }
+
+    // De-dup y límite
+    const seen = new Set();
+    const dedup = [];
+    for (const r of mapped) {
+      const key = `${r.name}|${r.price}|${r.url || ""}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        dedup.push(r);
+      }
+      if (dedup.length >= 60) break;
+    }
+    return dedup;
   } catch (err) {
     console.error("[CruzVerde] scraper error:", err?.message || err);
     return [];
