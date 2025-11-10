@@ -1,12 +1,12 @@
 // server.js – VIDESAPP API (prices-lite + federado + nearby)
-import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 import express from "express";
 import cors from "cors";
 import compression from "compression";
 import morgan from "morgan";
 import fs from "fs/promises";
+import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
-const BUILD  = "prices-lite-2025-10-29b";
+const BUILD  = "prices-lite-2025-11-10";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 const PORT   = process.env.PORT || 8080;
 
@@ -15,7 +15,8 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(compression());
 app.use(morgan("tiny"));
-// Timeout defensivo para cualquier ruta
+
+// Timeout defensivo
 app.use((req, res, next) => {
   res.setTimeout(15000, () => {
     try { res.status(504).json({ ok:false, error:"gateway_timeout" }); } catch {}
@@ -32,14 +33,17 @@ function kmBetween(a, b) {
   const A = sLat1*sLat1 + Math.cos(a.lat*Math.PI/180) * Math.cos(b.lat*Math.PI/180) * sLng1*sLng1;
   return 2 * R * Math.asin(Math.sqrt(A));
 }
+
 function mapsLink(lat, lng, label) {
   const q = encodeURIComponent(label || "");
   return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${q}`;
 }
+
 async function loadStores() {
   const raw = await fs.readFile(new URL("./data/stores.json", import.meta.url), "utf-8");
   return JSON.parse(raw);
 }
+
 const norm = (s) =>
   (s || "").toLowerCase().replace(/\./g, "").replace(/\s+/g, "").replace(/farmacia(s)?/g, "");
 
@@ -92,13 +96,31 @@ app.get("/search2", async (req, res) => {
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
-    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-    // ¡OJO! nombre del archivo en minúsculas
-    const { federatedSearchTop1 } = await import("./scrapers/searchfederated.js");
-    const data = await federatedSearchTop1(q);
-    res.json(data);
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+
+    const lat = Number(req.query.lat || process.env.GEO_LAT || -33.4489);
+    const lng = Number(req.query.lng || process.env.GEO_LNG || -70.6693);
+    const mapsKey = process.env.GOOGLE_MAPS_API_KEY || "";
+
+    // nuevo federado (fetchFederated.js)
+    const { searchFederated } = await import("./fetchFederated.js");
+    const results = await searchFederated({ q, lat, lng, mapsKey });
+
+    res.json({
+      ok: true,
+      q,
+      count: results.length,
+      items: results.map(r => ({
+        pharmacy: r.pharmacy,          // "ahumada", "cruzverde", etc.
+        name: r.name,                  // producto o "sin información"
+        price: r.price,                // puede ser null
+        distance_km: r.distance_km,    // número o null
+        maps_url: r.maps_url           // link "Cómo llegar"
+      }))
+    });
   } catch (err) {
-    res.status(500).json({ ok:false, error:String(err?.message || err) });
+    console.error("Error en /search", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
@@ -106,31 +128,24 @@ app.get("/search", async (req, res) => {
 app.get("/api/prices", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
-    const lat = req.query.lat ? Number(req.query.lat) : null;
-    const lng = req.query.lng ? Number(req.query.lng) : null;
-    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+    const lat = Number(req.query.lat || process.env.GEO_LAT || -33.4489);
+    const lng = Number(req.query.lng || process.env.GEO_LNG || -70.6693);
+    const mapsKey = process.env.GOOGLE_MAPS_API_KEY || "";
 
-    const { searchFederated } = await import("./scrapers/searchfederated.js"); // minúsculas
-    const items = await searchFederated(q, {
-      headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-    });
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+
+    const { searchFederated } = await import("./fetchFederated.js");
+    const items = await searchFederated({ q, lat, lng, mapsKey });
 
     res.json({
       ok: true,
       q,
       count: items.length,
-      items: items.map((r) => ({
-        store: r.store,   // "Cruz Verde", "Salcobrand", etc.
-        name:  r.name,
-        price: r.price,
-        url:   r.url || null,  // botón "Ir" usa esto
-        stock: r.stock ?? true,
-      })),
-      lat, lng,
+      items
     });
   } catch (e) {
-    res.status(500).json({ ok:false, error:String(e?.message || e) });
+    console.error("Error en /api/prices", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
@@ -190,7 +205,7 @@ app.get("/nearby", async (req, res) => {
   }
 });
 
-// -------------------- 404 (al final) --------------------
+// -------------------- 404 --------------------
 app.use((req, res) =>
   res.status(404).json({ ok:false, error:"not_found", path: req.path })
 );
