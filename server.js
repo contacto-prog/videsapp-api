@@ -211,9 +211,13 @@ app.use((req, res) =>
 );
 
 // -------------------- start & shutdown --------------------
-const server = app.listen(PORT, () =>
-  console.log(`✅ Server listening on port ${PORT}`, { BUILD, COMMIT })
+const server = app.listen(PORT, "0.0.0.0", () =>
+  console.log(`✅ Server listening on http://0.0.0.0:${PORT}`, { BUILD, COMMIT })
 );
+
+// sube el timeout a 30s
+server.setTimeout?.(30000);
+
 function shutdown() {
   try {
     server.close(() => process.exit(0));
