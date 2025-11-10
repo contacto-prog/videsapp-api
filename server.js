@@ -6,7 +6,7 @@ import morgan from "morgan";
 import fs from "fs/promises";
 import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
-const BUILD  = "prices-lite-2025-11-10";
+const BUILD  = "prices-lite-2025-11-10-hotfix";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 const PORT   = process.env.PORT || 8080;
 
@@ -16,7 +16,7 @@ app.use(cors());
 app.use(compression());
 app.use(morgan("tiny"));
 
-// Timeout defensivo
+// Timeout defensivo (respuesta 504 si algo se cuelga)
 app.use((req, res, next) => {
   res.setTimeout(15000, () => {
     try { res.status(504).json({ ok:false, error:"gateway_timeout" }); } catch {}
@@ -33,17 +33,14 @@ function kmBetween(a, b) {
   const A = sLat1*sLat1 + Math.cos(a.lat*Math.PI/180) * Math.cos(b.lat*Math.PI/180) * sLng1*sLng1;
   return 2 * R * Math.asin(Math.sqrt(A));
 }
-
 function mapsLink(lat, lng, label) {
   const q = encodeURIComponent(label || "");
   return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${q}`;
 }
-
 async function loadStores() {
   const raw = await fs.readFile(new URL("./data/stores.json", import.meta.url), "utf-8");
   return JSON.parse(raw);
 }
-
 const norm = (s) =>
   (s || "").toLowerCase().replace(/\./g, "").replace(/\s+/g, "").replace(/farmacia(s)?/g, "");
 
@@ -64,7 +61,7 @@ app.get("/prices-lite-ping", (_req, res) => {
   res.json({ ok: true, ping: "prices-lite", build: BUILD });
 });
 
-// -------------------- precios-lite --------------------
+// -------------------- precios-lite (JSON nativo de chainsLite) --------------------
 app.get("/prices-lite", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -78,7 +75,7 @@ app.get("/prices-lite", async (req, res) => {
   }
 });
 
-// Compat: /search2 -> precios-lite
+// Compat: /search2 -> precios-lite (mismo formato reducido)
 app.get("/search2", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -92,7 +89,8 @@ app.get("/search2", async (req, res) => {
   }
 });
 
-// -------------------- federado --------------------
+// -------------------- federado (Top-1 por cadena)
+// Intenta fetchFederated.js; si no está o falla, hace fallback a prices-lite
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -102,21 +100,39 @@ app.get("/search", async (req, res) => {
     const lng = Number(req.query.lng || process.env.GEO_LNG || -70.6693);
     const mapsKey = process.env.GOOGLE_MAPS_API_KEY || "";
 
-    // nuevo federado (fetchFederated.js)
-    const { searchFederated } = await import("./fetchFederated.js");
-    const results = await searchFederated({ q, lat, lng, mapsKey });
+    let results = null;
+    try {
+      const { searchFederated } = await import("./fetchFederated.js");
+      results = await searchFederated({ q, lat, lng, mapsKey });
+    } catch (_e) {
+      // Fallback: usamos prices-lite y rellenamos otras cadenas “sin información”
+      const lite = await searchChainPricesLite(q, { lat, lng });
+      const found = (lite.items || []).map(it => ({
+        pharmacy: (it.chain || "").toLowerCase(), // farmaexpress
+        name: it.name || "—",
+        price: it.price ?? null,
+        distance_km: it.nearest_km ?? null,
+        maps_url: it.nearest_maps_url ?? null,
+      }));
+      const want = ["ahumada","cruzverde","salcobrand","drsimi","farmaexpress"];
+      const have = new Set(found.map(x=>x.pharmacy));
+      const blanks = want
+        .filter(p=>!have.has(p))
+        .map(p=>({
+          pharmacy:p,
+          name: (p.charAt(0).toUpperCase()+p.slice(1)) + " — sin información",
+          price:null,
+          distance_km:null,
+          maps_url:null
+        }));
+      results = [...found, ...blanks];
+    }
 
     res.json({
       ok: true,
       q,
       count: results.length,
-      items: results.map(r => ({
-        pharmacy: r.pharmacy,          // "ahumada", "cruzverde", etc.
-        name: r.name,                  // producto o "sin información"
-        price: r.price,                // puede ser null
-        distance_km: r.distance_km,    // número o null
-        maps_url: r.maps_url           // link "Cómo llegar"
-      }))
+      items: results
     });
   } catch (err) {
     console.error("Error en /search", err);
@@ -124,43 +140,39 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// API oficial: precios federados (lista completa)
+// -------------------- API oficial esperada por la app --------------------
+// HOTFIX: usa prices-lite (sin Puppeteer) y acepta q= o product=
 app.get("/api/prices", async (req, res) => {
   try {
-    // Aceptar q= o product= (compatibilidad con la app)
     const q = String(req.query.q || req.query.product || "").trim();
-
-    // lat/lng siguen igual (radius es opcional; si viene lo ignoramos por ahora)
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
+    // radius no se usa aún (se puede filtrar luego con stores.json)
 
     if (!q) return res.status(400).json({ ok:false, error:"q_required" });
 
-    const { searchFederated } = await import("./scrapers/searchfederated.js");
+    const data = await searchChainPricesLite(q, { lat, lng });
 
-    const items = await searchFederated(q, {
-      headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-    });
+    // Adaptamos al formato que tu app ya consume: store/name/price/url/stock
+    const items = (data.items || []).map(r => ({
+      store: (r.chain || "").replace(/\b\w/g, c => c.toUpperCase()), // "Farmaexpress"
+      name:  r.name || "—",
+      price: r.price ?? null,
+      url:   r.url || null,
+      stock: true, // por defecto true (no rompemos el orden/colores)
+    }));
 
     res.json({
       ok: true,
       q,
       count: items.length,
-      items: items.map((r) => ({
-        store: r.store,   // "Cruz Verde", "Salcobrand", etc.
-        name:  r.name,
-        price: r.price,
-        url:   r.url || null,   // botón "Ir"
-        stock: r.stock ?? true, // default: true
-      })),
+      items,
       lat, lng,
     });
   } catch (e) {
     res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 });
-
 
 // -------------------- nearby --------------------
 app.get("/nearby", async (req, res) => {
@@ -227,8 +239,7 @@ app.use((req, res) =>
 const server = app.listen(PORT, "0.0.0.0", () =>
   console.log(`✅ Server listening on http://0.0.0.0:${PORT}`, { BUILD, COMMIT })
 );
-
-// sube el timeout a 30s
+// sube el timeout a 30s (útil en Render cold start)
 server.setTimeout?.(30000);
 
 function shutdown() {
