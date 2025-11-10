@@ -127,27 +127,40 @@ app.get("/search", async (req, res) => {
 // API oficial: precios federados (lista completa)
 app.get("/api/prices", async (req, res) => {
   try {
-    const q = String(req.query.q || "").trim();
-    const lat = Number(req.query.lat || process.env.GEO_LAT || -33.4489);
-    const lng = Number(req.query.lng || process.env.GEO_LNG || -70.6693);
-    const mapsKey = process.env.GOOGLE_MAPS_API_KEY || "";
+    // Aceptar q= o product= (compatibilidad con la app)
+    const q = String(req.query.q || req.query.product || "").trim();
 
-    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+    // lat/lng siguen igual (radius es opcional; si viene lo ignoramos por ahora)
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
 
-    const { searchFederated } = await import("./fetchFederated.js");
-    const items = await searchFederated({ q, lat, lng, mapsKey });
+    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
+
+    const { searchFederated } = await import("./scrapers/searchfederated.js");
+
+    const items = await searchFederated(q, {
+      headless: "new",
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    });
 
     res.json({
       ok: true,
       q,
       count: items.length,
-      items
+      items: items.map((r) => ({
+        store: r.store,   // "Cruz Verde", "Salcobrand", etc.
+        name:  r.name,
+        price: r.price,
+        url:   r.url || null,   // botón "Ir"
+        stock: r.stock ?? true, // default: true
+      })),
+      lat, lng,
     });
   } catch (e) {
-    console.error("Error en /api/prices", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 });
+
 
 // -------------------- nearby --------------------
 app.get("/nearby", async (req, res) => {
