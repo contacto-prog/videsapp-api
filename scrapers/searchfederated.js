@@ -1,99 +1,108 @@
-cat > scrapers/searchfederated.js <<'EOF'
-// scrapers/searchfederated.js
-import puppeteer from "puppeteer";
-import { normalize } from "./utils.js";
+// scrapers/searchfederated.js – versión unificada VIDESAPP
+import { searchAhumada } from "./ahumada.js";
+import { searchCruzVerde } from "./cruzverde.js";
+import { searchSalcobrand } from "./salcobrand.js";
+import { searchFarmaexpress } from "./farmaexpress.js";
+import { searchDrSimi } from "./drsimi.js";
+import { nearestInfo } from "./utils.js";
 
-import { fetchAhumada } from "./ahumada.js";
-import { fetchCruzVerde } from "./cruzverde.js";
-import { fetchSalcobrand } from "./salcobrand.js";
-import { fetchFarmaexpress } from "./farmaexpress.js";
-import { fetchDrSimi } from "./drsimi.js";
-
-function keyOf(q){
-  if (typeof q === "string") return q.trim();
-  if (q && typeof q === "object") return String(q.name ?? q.q ?? "").trim();
-  return "";
-}
-
-const SOURCES = [
-  ["Ahumada",      fetchAhumada],
-  ["Cruz Verde",   fetchCruzVerde],
-  ["Salcobrand",   fetchSalcobrand],
-  ["Farmaexpress", fetchFarmaexpress],
-  ["Dr. Simi",     fetchDrSimi],
+/**
+ * Definición de cadenas y etiquetas amigables
+ */
+const CHAINS = [
+  { key: "ahumada",     label: "Farmacias Ahumada" },
+  { key: "cruzverde",   label: "Cruz Verde" },
+  { key: "salcobrand",  label: "Salcobrand" },
+  { key: "farmaexpress",label: "Farmaexpress" },
+  { key: "drsimi",      label: "Dr. Simi" }
 ];
 
-export async function searchFederated(q, { headless = "new", executablePath } = {}) {
-  const query = keyOf(q);
-  if (!query) return [];
+/**
+ * Busca productos en todas las cadenas activas
+ * Devuelve una lista con precio, distancia y link a Google Maps.
+ */
+export async function searchFederated({ q, lat, lng, mapsKey }) {
+  if (!q) return [];
 
-  const opts = {
-    puppeteer,
-    headless,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || executablePath,
+  // 1️⃣ Ejecuta todos los scrapers disponibles
+  const [ah, cv, sb, fx, ds] = await Promise.allSettled([
+    searchAhumada(q),
+    searchCruzVerde(q),
+    searchSalcobrand(q),
+    searchFarmaexpress(q),
+    searchDrSimi(q)
+  ]);
+
+  const got = {
+    ahumada:     (ah.value||[])[0]     || null,
+    cruzverde:   (cv.value||[])[0]     || null,
+    salcobrand:  (sb.value||[])[0]     || null,
+    farmaexpress:(fx.value||[])[0]     || null,
+    drsimi:      (ds.value||[])[0]     || null
   };
 
-  const settled = await Promise.allSettled(
-    SOURCES.map(async ([name, fn]) => {
-      try {
-        const res = await fn(query, opts);
-        if (process.env.DEBUG_PRICES) {
-          const withPrice = (res || []).filter(x => Number.isFinite(x?.price));
-          console.error(\`[\${name}] total=\${res?.length || 0} conPrecio=\${withPrice.length}\`);
-        }
-        return res || [];
-      } catch (e) {
-        if (process.env.DEBUG_PRICES) console.error(\`[\${name}] ERROR:\`, e?.message || e);
-        return [];
-      }
-    })
+  // 2️⃣ Calcula distancia y link a Maps para cada cadena
+  const dists = await Promise.all(
+    CHAINS.map(c => nearestInfo(c.label, lat, lng, mapsKey))
+  );
+  const distMap = Object.fromEntries(
+    CHAINS.map((c,i)=>[c.key, dists[i]])
   );
 
-  const flat = settled.flatMap(r => (r.status === "fulfilled" ? r.value : [])) || [];
-
-  const items = flat
-    .map(it => {
-      const store = normalize(it?.store || it?.source || "");
-      const name  = normalize(it?.name || "");
-      const price = Number(it?.price);
-      if (!store || !name || !Number.isFinite(price) || price <= 0) return null;
+  // 3️⃣ Genera una salida por cada cadena (con placeholder si falta precio)
+  const out = CHAINS.map(c => {
+    const real = got[c.key];
+    const d = distMap[c.key] || null;
+    if (real) {
       return {
-        store,
-        name,
-        price,
-        img: it?.img || null,
-        url: it?.url || null,
-        stock: typeof it?.stock === "boolean" ? it.stock : true,
+        pharmacy: c.key,
+        name: real.name,
+        price: real.price ?? null,
+        distance_km: d ? d.km : null,
+        maps_url: d ? d.maps_url : null
       };
-    })
-    .filter(Boolean);
-
-  const seen = new Set();
-  const dedup = [];
-  for (const it of items) {
-    const key = \`\${it.store}|\${it.name}|\${it.price}\`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      dedup.push(it);
     }
-    if (dedup.length >= 120) break;
-  }
+    return {
+      pharmacy: c.key,
+      name: `${c.label} — sin información`,
+      price: null,
+      distance_km: d ? d.km : null,
+      maps_url: d ? d.maps_url : null
+    };
+  });
 
-  return dedup;
+  // 4️⃣ Ordena primero por precio, luego distancia
+  out.sort((a,b)=>{
+    if (a.price == null && b.price != null) return 1;
+    if (a.price != null && b.price == null) return -1;
+    if (a.price != null && b.price != null && a.price !== b.price) return a.price - b.price;
+    const da = a.distance_km ?? Infinity, db = b.distance_km ?? Infinity;
+    return da - db;
+  });
+
+  return out;
 }
 
+/**
+ * Versión top1 (compatibilidad con server viejo)
+ */
 export async function federatedSearchTop1(q, opts = {}) {
-  const all = await searchFederated(q, opts);
+  const lat = Number(opts.lat || process.env.GEO_LAT || -33.4489);
+  const lng = Number(opts.lng || process.env.GEO_LNG || -70.6693);
+  const mapsKey = process.env.GOOGLE_MAPS_API_KEY || "";
+  const all = await searchFederated({ q, lat, lng, mapsKey });
   if (!all.length) return [];
-  const bestByStore = new Map();
+  // solo devolver la más barata por cadena
+  const bestByPharmacy = new Map();
   for (const it of all) {
-    const k = it.store.toLowerCase();
-    const cur = bestByStore.get(k);
-    if (!cur || it.price < cur.price) bestByStore.set(k, it);
+    const k = it.pharmacy;
+    const cur = bestByPharmacy.get(k);
+    if (!cur || (it.price ?? Infinity) < (cur.price ?? Infinity)) {
+      bestByPharmacy.set(k, it);
+    }
   }
-  return Array.from(bestByStore.values()).sort((a, b) => a.price - b.price);
+  return Array.from(bestByPharmacy.values());
 }
 
 const defaultExport = { searchFederated, federatedSearchTop1 };
 export default defaultExport;
-EOF
