@@ -154,30 +154,81 @@ app.get("/search", async (req, res) => {
 });
 
 // -------------------- API oficial esperada por la app --------------------
-// HOTFIX: usa prices-lite (sin Puppeteer) y acepta q= o product=
+// Enriquecido: devolvemos también chainName, storeName, buyUrl, logoUrl,
+// mapsUrl, updatedAt y distanceKm=null para que el UI no muestre “—”.
 app.get("/api/prices", async (req, res) => {
   try {
+    // Aceptamos q= o product= (compat con la app)
     const q = String(req.query.q || req.query.product || "").trim();
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
 
-    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-
+    const { searchChainPricesLite } = await import("./scrapers/chainsLite.js");
     const data = await searchChainPricesLite(q, { lat, lng });
 
-    const items = (data.items || []).map(r => ({
-      store: (r.chain || "").replace(/\b\w/g, c => c.toUpperCase()),
-      name:  r.name || "—",
-      price: r.price ?? null,
-      url:   r.url || null,
-      stock: true,
-    }));
+    // Logos simples por cadena (opcional: cámbialos por URLs propias)
+    const CHAIN_META = {
+      "Farmaexpress": {
+        logo: "https://i.imgur.com/0vE5S3C.png"
+      },
+      "Cruz Verde": {
+        logo: "https://i.imgur.com/7vHcU5d.png"
+      },
+      "Salcobrand": {
+        logo: "https://i.imgur.com/3Yb0m2m.png"
+      },
+      "Ahumada": {
+        logo: "https://i.imgur.com/0Q8b0vG.png"
+      },
+      "Dr. Simi": {
+        logo: "https://i.imgur.com/xj9pQyZ.png"
+      }
+    };
 
-    res.json({ ok:true, q, count: items.length, items, lat, lng, _query_used: q });
+    const mapsSearchUrl = (chain) =>
+      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+        `Farmacia ${chain}`
+      )}`;
+
+    // items de chainsLite: { chain, price, url }
+    // Adaptamos al formato que la app espera
+    const items = (data.items || []).map((r) => {
+      const chain = r.chain || "—";
+      const meta = CHAIN_META[chain] || {};
+      return {
+        // Campos “clásicos” que ya estabas usando
+        store: chain,
+        name: r.name || q,              // si no hay nombre, mostramos la búsqueda
+        price: r.price ?? null,
+        url: r.url || null,
+        stock: true,
+
+        // Campos extra para que el UI no muestre “—”
+        chainName: chain,
+        storeName: chain,               // no tenemos sucursal exacta (aún)
+        distanceKm: null,               // sin cálculo por ahora
+        buyUrl: r.url || null,
+        logoUrl: meta.logo || null,
+        mapsUrl: mapsSearchUrl(chain),  // botón “Ir” abre Maps a “Farmacia {cadena}”
+        updatedAt: new Date().toISOString()
+      };
+    });
+
+    res.json({
+      ok: true,
+      q,
+      count: items.length,
+      items,
+      lat,
+      lng,
+      _query_used: q
+    });
   } catch (e) {
-    res.status(500).json({ ok:false, error:String(e?.message || e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
 
 // -------------------- nearby --------------------
 app.get("/nearby", async (req, res) => {
