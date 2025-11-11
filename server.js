@@ -1,4 +1,4 @@
-// server.js – VIDESAPP API (prices-lite + federado + nearby)
+// server.js – VIDESAPP API (enriquecido con sucursal más cercana por cadena)
 import express from "express";
 import cors from "cors";
 import compression from "compression";
@@ -6,7 +6,7 @@ import morgan from "morgan";
 import fs from "fs/promises";
 import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
-const BUILD  = "prices-lite-2025-11-10-hotfix";
+const BUILD  = "prices-lite-2025-11-11-nearest";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 const PORT   = process.env.PORT || 8080;
 
@@ -16,7 +16,7 @@ app.use(cors());
 app.use(compression());
 app.use(morgan("tiny"));
 
-// Timeout defensivo (respuesta 504 si algo se cuelga)
+// Timeout defensivo
 app.use((req, res, next) => {
   res.setTimeout(15000, () => {
     try { res.status(504).json({ ok:false, error:"gateway_timeout" }); } catch {}
@@ -33,16 +33,35 @@ function kmBetween(a, b) {
   const A = sLat1*sLat1 + Math.cos(a.lat*Math.PI/180) * Math.cos(b.lat*Math.PI/180) * sLng1*sLng1;
   return 2 * R * Math.asin(Math.sqrt(A));
 }
-function mapsLink(lat, lng, label) {
-  const q = encodeURIComponent(label || "");
-  return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${q}`;
+
+function mapsUrlFor(lat, lng, label) {
+  const name = encodeURIComponent(label || "");
+  return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&destination_name=${name}`;
 }
+
 async function loadStores() {
   const raw = await fs.readFile(new URL("./data/stores.json", import.meta.url), "utf-8");
   return JSON.parse(raw);
 }
-const norm = (s) =>
-  (s || "").toLowerCase().replace(/\./g, "").replace(/\s+/g, "").replace(/farmacia(s)?/g, "");
+
+// normalización simple para cruzar cadenas
+function normBrand(s) {
+  return String(s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\./g, "")
+    .replace(/\s+/g, "")
+    .replace(/farmacia(s)?/g, "");
+}
+
+// Logo por cadena (ajústalos si quieres otras URLs)
+const LOGOS = {
+  "ahumada":       "https://static-videsapp.s3.amazonaws.com/logos/ahumada.png",
+  "cruzverde":     "https://static-videsapp.s3.amazonaws.com/logos/cruzverde.png",
+  "salcobrand":    "https://static-videsapp.s3.amazonaws.com/logos/salcobrand.png",
+  "farmaexpress":  "https://static-videsapp.s3.amazonaws.com/logos/farmaexpress.png",
+  "drsimi":        "https://static-videsapp.s3.amazonaws.com/logos/drsimi.png",
+};
 
 // -------------------- Health --------------------
 app.get("/", (_req, res) => res.type("text/plain").send("VIDESAPP API – OK"));
@@ -61,21 +80,7 @@ app.get("/prices-lite-ping", (_req, res) => {
   res.json({ ok: true, ping: "prices-lite", build: BUILD });
 });
 
-// -------------------- DEBUG: Dr. Simi --------------------
-app.get("/debug/drsimi", async (req, res) => {
-  try {
-    const q = String(req.query.q || "").trim();
-    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-
-    const { searchDrSimiDebug } = await import("./scrapers/drsimi.js");
-    const out = await searchDrSimiDebug(q);
-    res.json({ ok:true, q, ...out });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:String(e?.message || e) });
-  }
-});
-
-// -------------------- precios-lite (JSON nativo de chainsLite) --------------------
+// -------------------- precios-lite (sin enriquecer) --------------------
 app.get("/prices-lite", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -89,22 +94,7 @@ app.get("/prices-lite", async (req, res) => {
   }
 });
 
-// Compat: /search2 -> precios-lite (mismo formato reducido)
-app.get("/search2", async (req, res) => {
-  try {
-    const q = String(req.query.q || "").trim();
-    const lat = req.query.lat ? Number(req.query.lat) : null;
-    const lng = req.query.lng ? Number(req.query.lng) : null;
-    if (!q) return res.status(400).json({ ok:false, error:"q_required" });
-    const data = await searchChainPricesLite(q, { lat, lng });
-    res.json({ ok:true, q, count: data.count, items: data.items });
-  } catch (err) {
-    res.status(500).json({ ok:false, error:String(err?.message || err) });
-  }
-});
-
-// -------------------- federado (Top-1 por cadena)
-// Intenta fetchFederated.js; si no está o falla, hace fallback a prices-lite
+// -------------------- federado (top-1 por cadena) --------------------
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -112,125 +102,152 @@ app.get("/search", async (req, res) => {
 
     const lat = Number(req.query.lat || process.env.GEO_LAT || -33.4489);
     const lng = Number(req.query.lng || process.env.GEO_LNG || -70.6693);
-    const mapsKey = process.env.GOOGLE_MAPS_API_KEY || "";
 
-    let results = null;
-    try {
-      const { searchFederated } = await import("./fetchFederated.js");
-      results = await searchFederated({ q, lat, lng, mapsKey });
-    } catch (_e) {
-      const lite = await searchChainPricesLite(q, { lat, lng });
-      const found = (lite.items || []).map(it => ({
-        pharmacy: (it.chain || "").toLowerCase(),
-        name: it.name || "—",
-        price: it.price ?? null,
-        distance_km: it.nearest_km ?? null,
-        maps_url: it.nearest_maps_url ?? null,
-      }));
-      const want = ["ahumada","cruzverde","salcobrand","drsimi","farmaexpress"];
-      const have = new Set(found.map(x=>x.pharmacy));
-      const blanks = want
-        .filter(p=>!have.has(p))
-        .map(p=>({
-          pharmacy:p,
-          name: (p.charAt(0).toUpperCase()+p.slice(1)) + " — sin información",
-          price:null,
-          distance_km:null,
-          maps_url:null
-        }));
-      results = [...found, ...blanks];
-    }
+    // Intento: usar prices-lite como federado básico (rápido y sin puppeteer)
+    const lite = await searchChainPricesLite(q, { lat, lng });
+    const found = (lite.items || []).map(it => ({
+      pharmacy: (it.chain || "").toLowerCase(), // "farmaexpress"
+      name: it.name || "—",
+      price: it.price ?? null,
+      distance_km: it.nearest_km ?? null,
+      maps_url: it.nearest_maps_url ?? null,
+    }));
 
-    res.json({
-      ok: true,
-      q,
-      count: results.length,
-      items: results
-    });
+    // Rellenar otras cadenas visibles en Chile
+    const want = ["ahumada","cruzverde","salcobrand","drsimi","farmaexpress"];
+    const have = new Set(found.map(x=>x.pharmacy));
+    const blanks = want
+      .filter(p=>!have.has(p))
+      .map(p=>({ pharmacy:p, name:`${p[0].toUpperCase()+p.slice(1)} — sin información`, price:null, distance_km:null, maps_url:null }));
+
+    const results = [...found, ...blanks];
+
+    res.json({ ok: true, q, count: results.length, items: results });
   } catch (err) {
     console.error("Error en /search", err);
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-// -------------------- API oficial esperada por la app --------------------
-// Enriquecido: devolvemos también chainName, storeName, buyUrl, logoUrl,
-// mapsUrl, updatedAt y distanceKm=null para que el UI no muestre “—”.
+// -------------------- API oficial para la app (ENRIQUECIDA) --------------------
 app.get("/api/prices", async (req, res) => {
   try {
-    // Aceptamos q= o product= (compat con la app)
-    const q = String(req.query.q || req.query.product || "").trim();
+    const qRaw = String(req.query.q || req.query.product || "").trim();
+    if (!qRaw) return res.status(400).json({ ok:false, error:"q_required" });
+
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
-    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
 
-    const { searchChainPricesLite } = await import("./scrapers/chainsLite.js");
-    const data = await searchChainPricesLite(q, { lat, lng });
-
-    // Logos simples por cadena (opcional: cámbialos por URLs propias)
-    const CHAIN_META = {
-      "Farmaexpress": {
-        logo: "https://i.imgur.com/0vE5S3C.png"
-      },
-      "Cruz Verde": {
-        logo: "https://i.imgur.com/7vHcU5d.png"
-      },
-      "Salcobrand": {
-        logo: "https://i.imgur.com/3Yb0m2m.png"
-      },
-      "Ahumada": {
-        logo: "https://i.imgur.com/0Q8b0vG.png"
-      },
-      "Dr. Simi": {
-        logo: "https://i.imgur.com/xj9pQyZ.png"
+    // 1) precios rápidos por cadena
+    const lite = await searchChainPricesLite(qRaw, { lat, lng });
+    const byChain = new Map(); // key: normalized chain -> { chainName, price, url, name }
+    for (const it of (lite.items || [])) {
+      const key = normBrand(it.chain);
+      const prev = byChain.get(key);
+      // nos quedamos con el mejor precio por cadena
+      if (!prev || (Number.isFinite(it.price) && it.price < prev.price)) {
+        byChain.set(key, {
+          chainName: it.chain || "",
+          price: Number.isFinite(it.price) ? it.price : null,
+          buyUrl: it.url || null,
+          // it.name puede venir, si no, ponemos qRaw
+          productName: it.name || qRaw,
+        });
       }
-    };
+    }
 
-    const mapsSearchUrl = (chain) =>
-      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-        `Farmacia ${chain}`
-      )}`;
+    // 2) armar set de cadenas objetivo (incluye las grandes aunque no haya precio)
+    const targetChains = new Set([
+      ...byChain.keys(),
+      normBrand("Ahumada"),
+      normBrand("Cruz Verde"),
+      normBrand("Salcobrand"),
+      normBrand("Farmaexpress"),
+      normBrand("Dr Simi"),
+    ]);
 
-    // items de chainsLite: { chain, price, url }
-    // Adaptamos al formato que la app espera
-    const items = (data.items || []).map((r) => {
-      const chain = r.chain || "—";
-      const meta = CHAIN_META[chain] || {};
-      return {
-        // Campos “clásicos” que ya estabas usando
-        store: chain,
-        name: r.name || q,              // si no hay nombre, mostramos la búsqueda
-        price: r.price ?? null,
-        url: r.url || null,
-        stock: true,
+    // 3) cargar sucursales y buscar la más cercana por cadena
+    const stores = await loadStores(); // [{brand,name,lat,lng,address}, ...]
+    const nearest = {}; // key normBrand -> { storeName, km, mapsUrl }
 
-        // Campos extra para que el UI no muestre “—”
-        chainName: chain,
-        storeName: chain,               // no tenemos sucursal exacta (aún)
-        distanceKm: null,               // sin cálculo por ahora
-        buyUrl: r.url || null,
-        logoUrl: meta.logo || null,
-        mapsUrl: mapsSearchUrl(chain),  // botón “Ir” abre Maps a “Farmacia {cadena}”
-        updatedAt: new Date().toISOString()
-      };
+    if (lat != null && lng != null) {
+      const user = { lat, lng };
+      for (const key of targetChains) {
+        // pool por marca
+        const pool = stores.filter((s) => {
+          const nb = normBrand(s.brand);
+          return nb === key || nb.includes(key) || key.includes(nb);
+        });
+        if (!pool.length) continue;
+
+        let best = null, bestKm = Infinity;
+        for (const s of pool) {
+          const km = kmBetween(user, { lat: s.lat, lng: s.lng });
+          if (km < bestKm) { bestKm = km; best = s; }
+        }
+        if (best) {
+          nearest[key] = {
+            storeName: best.name,
+            distanceKm: Math.round(bestKm * 10) / 10,
+            mapsUrl: mapsUrlFor(best.lat, best.lng, `${best.name} ${best.address || ""}`.trim()),
+          };
+        }
+      }
+    }
+
+    // 4) construir respuesta homogénea para la app
+    const out = [];
+    for (const key of targetChains) {
+      const info = byChain.get(key) || { chainName: null, price: null, buyUrl: null, productName: qRaw };
+      const chainName = info.chainName || (
+        key === "ahumada" ? "Ahumada" :
+        key === "cruzverde" ? "Cruz Verde" :
+        key === "salcobrand" ? "Salcobrand" :
+        key === "farmaexpress" ? "Farmaexpress" :
+        key === "drsimi" ? "Dr. Simi" : "—"
+      );
+
+      const near = nearest[key] || null;
+      out.push({
+        // Campos que tu app ya consume:
+        chainName,                           // ej. "Ahumada"
+        price: info.price,                   // null si no hay
+        inStock: true,                       // seguimos true para no romper color
+        storeName: near?.storeName ?? null,  // ej. "Farmacias Ahumada - Av Vitacura 3619"
+        distanceKm: near?.distanceKm ?? null,
+        logoUrl: LOGOS[key] || null,
+        buyUrl: info.buyUrl ? new URL(info.buyUrl).toString() : null,
+        updatedAt: new Date().toISOString(),
+
+        // Extra opcional (por si luego lo quieres usar):
+        mapsUrl: near?.mapsUrl ?? null,
+        productName: info.productName,
+      });
+    }
+
+    // orden: con precio primero, luego menor distancia
+    out.sort((a, b) => {
+      if (a.price != null && b.price != null) return a.price - b.price;
+      if (a.price != null) return -1;
+      if (b.price != null) return 1;
+      const da = a.distanceKm ?? Infinity, db = b.distanceKm ?? Infinity;
+      return da - db;
     });
 
     res.json({
       ok: true,
-      q,
-      count: items.length,
-      items,
-      lat,
-      lng,
-      _query_used: q
+      q: qRaw,
+      count: out.length,
+      items: out,
+      lat, lng,
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("Error /api/prices", e);
+    res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 });
 
-
-// -------------------- nearby --------------------
+// -------------------- nearby (se mantiene) --------------------
 app.get("/nearby", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -248,9 +265,9 @@ app.get("/nearby", async (req, res) => {
     const rows = [];
     for (const it of (prices.items || [])) {
       const chain = it.chain || "";
-      const nc = norm(chain);
+      const nc = normBrand(chain);
       const pool = stores.filter((s) => {
-        const nb = norm(s.brand);
+        const nb = normBrand(s.brand);
         return nb.includes(nc) || nc.includes(nb);
       });
       if (!pool.length) continue;
@@ -268,7 +285,7 @@ app.get("/nearby", async (req, res) => {
         storeName: best.name,
         address: best.address,
         distance_km: Math.round(bestKm * 10) / 10,
-        mapsUrl: mapsLink(best.lat, best.lng, `${best.name} ${best.address}`),
+        mapsUrl: mapsUrlFor(best.lat, best.lng, `${best.name} ${best.address}`),
         productUrl: it.url || null,
       });
     }
