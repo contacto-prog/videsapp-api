@@ -1,52 +1,51 @@
 // scrapers/drsimi.js
-// Buscador liviano para DR. SIMI (Chile) con tolerancia a cambios.
-// Intenta varias rutas de búsqueda y extrae (nombre, precio, link) por patrones comunes.
+// Dr. Simi (Chile) – scraper liviano y tolerante a cambios.
+// Intenta varias rutas de búsqueda y extrae (name, price, url) con heurísticas genéricas.
 
 import { getText, headers, priceCLPnum, normalize } from "./utils.js";
 
-// Variantes de búsqueda que suelen existir (WordPress / tienda).
 function candidateSearchUrls(query) {
   const q = encodeURIComponent(query);
   return [
-    // e-commerce genéricos
+    // e-commerce / buscadores comunes
     `https://www.drsimi.cl/search?q=${q}`,
     `https://drsimi.cl/search?q=${q}`,
 
-    // WordPress/WooCommerce búsqueda por parámetro "s"
+    // WordPress/WooCommerce
     `https://www.drsimi.cl/?s=${q}`,
     `https://drsimi.cl/?s=${q}`,
 
-    // Fallback región (algunas tiendas usan subpath /tienda)
+    // Algunas instancias usan /tienda
     `https://www.drsimi.cl/tienda/?s=${q}`,
     `https://drsimi.cl/tienda/?s=${q}`,
   ];
 }
 
-// Heurísticas de parseo de HTML (sin depender de una sola clase CSS)
+// Parseo tolerante
 function parseHtmlToItems(html, baseUrl) {
   const items = [];
 
-  // 1) Trozos por "article"/"product" típicos de WooCommerce / grids
+  // 1) Tarjetas de producto típicas (WooCommerce / grids)
   const cardRegex = /<(article|div)[^>]+class="[^"]*(product|grid|item)[^"]*"[^>]*>([\s\S]*?)<\/\1>/gi;
   let m;
   while ((m = cardRegex.exec(html))) {
     const chunk = m[3];
 
-    // Nombre (etiquetas típicas: h2, h3, a[title], data-product_title)
+    // Nombre
     let name =
       (chunk.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i)?.[1] ??
        chunk.match(/title="([^"]+)"/i)?.[1] ??
        chunk.match(/data-product[-_ ]?title="([^"]+)"/i)?.[1] ??
        "").replace(/<[^>]+>/g, " ").trim();
 
-    // Precio (patrones CLP: $ 3.990 / 3.990 / 3990 / 3,990.00)
+    // Precio (CLP con o sin separadores)
     const priceRaw =
       chunk.match(/\$\s?\d{1,3}([.\s]\d{3})+([,\.]\d{1,2})?/i)?.[0] ??
       chunk.match(/\b\d{1,3}([.\s]\d{3})+([,\.]\d{1,2})?\b/)?.[0] ??
       null;
     const price = priceCLPnum(priceRaw);
 
-    // Link
+    // URL
     const href =
       chunk.match(/<a[^>]+href="([^"]+)"[^>]*>(?!\s*<img)/i)?.[1] ??
       chunk.match(/<a[^>]+href='([^']+)'[^>]*>(?!\s*<img)/i)?.[1] ??
@@ -55,16 +54,12 @@ function parseHtmlToItems(html, baseUrl) {
       ? (href.startsWith("http") ? href : new URL(href, baseUrl).toString())
       : null;
 
-    // Filtrado básico
     if (!name) continue;
-    // Evitar tarjetas sin precio cuando claramente son banners, etc
-    // (igual dejamos algunas sin precio porque el sitio puede ocultarlo con JS).
     items.push({ chain: "drsimi", name, price: price ?? null, url });
     if (items.length >= 30) break;
   }
 
-  // 2) Si no encontramos nada con la estrategia anterior, busquemos anchors
-  // con texto y un precio cerca (más laxo).
+  // 2) Fallback: anchors con precio cerca
   if (items.length === 0) {
     const rowRegex = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
     let r;
@@ -85,7 +80,6 @@ function parseHtmlToItems(html, baseUrl) {
         ? (href.startsWith("http") ? href : new URL(href, baseUrl).toString())
         : null;
 
-      // Guardamos aunque no haya price (puede mostrarse con JS)
       items.push({ chain: "drsimi", name, price: price ?? null, url });
       if (items.length >= 30) break;
     }
@@ -108,13 +102,13 @@ function parseHtmlToItems(html, baseUrl) {
 export async function searchDrSimi(q) {
   const urls = candidateSearchUrls(q);
   const hdrs = headers("https://www.drsimi.cl", "text/html,*/*");
+
   for (const url of urls) {
     try {
       const r = await getText(url, hdrs);
       if (r.status >= 200 && r.status < 300 && (r.text || "").length > 0) {
-        const items = parseHtmlToItems(r.text, url);
+        const items = parseHtmlToItems(r.text.toLowerCase(), url);
         if (items.length) {
-          // Normaliza el nombre (igual que otras cadenas)
           return items.map((x) => ({
             chain: "drsimi",
             name: x.name,
@@ -127,5 +121,33 @@ export async function searchDrSimi(q) {
       // probar siguiente URL
     }
   }
-  return []; // no hallado (el caller rellenará “sin información”)
+  return [];
+}
+
+// Modo depuración: devuelve además el detalle de cada intento
+export async function searchDrSimiDebug(q) {
+  const tried = [];
+  const urls = candidateSearchUrls(q);
+  const hdrs = headers("https://www.drsimi.cl", "text/html,*/*");
+
+  for (const url of urls) {
+    try {
+      const r = await getText(url, hdrs);
+      const ok = r.status >= 200 && r.status < 300;
+      const text = (r.text || "");
+      const items = ok ? parseHtmlToItems(text.toLowerCase(), url) : [];
+      tried.push({
+        url,
+        status: r.status,
+        bytes: text.length,
+        items_found: items.length,
+      });
+      if (items.length) {
+        return { items: items.map(it => ({ ...it, chain: "drsimi" })), tried };
+      }
+    } catch (e) {
+      tried.push({ url, status: "ERR", bytes: 0, items_found: 0, error: String(e?.message || e) });
+    }
+  }
+  return { items: [], tried };
 }
