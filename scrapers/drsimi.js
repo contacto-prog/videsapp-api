@@ -1,175 +1,131 @@
 // scrapers/drsimi.js
-import {
-  safeGoto,
-  tryDismissCookieBanners,
-  autoScroll,
-  normalize,
-  parsePriceCLP,
-  pickPriceFromHtml,
-  pickCards,
-} from "./utils.js";
+// Buscador liviano para DR. SIMI (Chile) con tolerancia a cambios.
+// Intenta varias rutas de búsqueda y extrae (nombre, precio, link) por patrones comunes.
 
-export const sourceId = "drsimi";
+import { getText, headers, priceCLPnum, normalize } from "./utils.js";
 
-/**
- * Scraper Dr. Simi (Chile)
- * Estrategia:
- *  1) Intentar páginas de búsqueda conocidas (Shopify/variantes).
- *  2) Extraer tarjetas con múltiples selectores de nombre/precio/link.
- *  3) Fallback: patrón CLP sobre innerText/HTML si los selectores fallan.
- */
-export async function fetchDrSimi(
-  q,
-  { puppeteer, headless = "new", executablePath } = {}
-) {
-  if (!puppeteer) throw new Error("fetchDrSimi requiere puppeteer en opts");
+// Variantes de búsqueda que suelen existir (WordPress / tienda).
+function candidateSearchUrls(query) {
+  const q = encodeURIComponent(query);
+  return [
+    // e-commerce genéricos
+    `https://www.drsimi.cl/search?q=${q}`,
+    `https://drsimi.cl/search?q=${q}`,
 
-  const browser = await puppeteer.launch({
-    headless,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || executablePath,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
+    // WordPress/WooCommerce búsqueda por parámetro "s"
+    `https://www.drsimi.cl/?s=${q}`,
+    `https://drsimi.cl/?s=${q}`,
 
-  let page;
-  try {
-    page = await browser.newPage();
-    await setPageDefaults(page);
+    // Fallback región (algunas tiendas usan subpath /tienda)
+    `https://www.drsimi.cl/tienda/?s=${q}`,
+    `https://drsimi.cl/tienda/?s=${q}`,
+  ];
+}
 
-    // Rutas de búsqueda que suelen existir en Shopify / implementaciones personalizadas
-    const searchUrls = [
-      `https://www.drsimi.cl/search?q=${encodeURIComponent(q)}`,
-      `https://www.drsimi.cl/pages/busqueda?q=${encodeURIComponent(q)}`,
-      `https://www.drsimi.cl/?s=${encodeURIComponent(q)}`,
-      `https://www.drsimi.cl/buscar?q=${encodeURIComponent(q)}`,
-    ];
+// Heurísticas de parseo de HTML (sin depender de una sola clase CSS)
+function parseHtmlToItems(html, baseUrl) {
+  const items = [];
 
-    const all = [];
+  // 1) Trozos por "article"/"product" típicos de WooCommerce / grids
+  const cardRegex = /<(article|div)[^>]+class="[^"]*(product|grid|item)[^"]*"[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m;
+  while ((m = cardRegex.exec(html))) {
+    const chunk = m[3];
 
-    // Selectores amplios para múltiples themes (Shopify, custom, genéricos)
-    const cardsSelectors = {
-      cards: [
-        // Shopify comunes:
-        ".product-grid .grid__item",
-        ".product-card",
-        ".card-wrapper",
-        ".product-item",
-        "li.product",
-        ".collection__product, .product-grid-item",
-        // fallback genérico
-        ".grid li, .grid .item, .products .product",
-      ].join(","),
-      name: [
-        ".product-card__title",
-        ".card__heading",
-        ".product-item__title",
-        ".product__title",
-        ".product-title",
-        ".product-card-title",
-        "a[title]",
-      ],
-      price: [
-        ".price-item--regular",
-        ".price__regular",
-        ".price .amount",
-        ".price, .product-price, .price__current, .money",
-        "[data-price], [itemprop='price'], [data-product-price]",
-      ],
-      link: [
-        "a.product-card__link",
-        ".card__heading a",
-        "a.product-item__image-wrapper",
-        "a[href*='/products/']",
-        "a[href^='/']",
-      ],
-    };
+    // Nombre (etiquetas típicas: h2, h3, a[title], data-product_title)
+    let name =
+      (chunk.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i)?.[1] ??
+       chunk.match(/title="([^"]+)"/i)?.[1] ??
+       chunk.match(/data-product[-_ ]?title="([^"]+)"/i)?.[1] ??
+       "").replace(/<[^>]+>/g, " ").trim();
 
-    for (const url of searchUrls) {
-      const ok = await safeGoto(page, url, 25000);
-      if (!ok) continue;
+    // Precio (patrones CLP: $ 3.990 / 3.990 / 3990 / 3,990.00)
+    const priceRaw =
+      chunk.match(/\$\s?\d{1,3}([.\s]\d{3})+([,\.]\d{1,2})?/i)?.[0] ??
+      chunk.match(/\b\d{1,3}([.\s]\d{3})+([,\.]\d{1,2})?\b/)?.[0] ??
+      null;
+    const price = priceCLPnum(priceRaw);
 
-      await tryDismissCookieBanners(page);
-      await page.waitForTimeout(1500);
-      await autoScroll(page, { steps: 8, delay: 250 });
-      await page.waitForTimeout(800);
+    // Link
+    const href =
+      chunk.match(/<a[^>]+href="([^"]+)"[^>]*>(?!\s*<img)/i)?.[1] ??
+      chunk.match(/<a[^>]+href='([^']+)'[^>]*>(?!\s*<img)/i)?.[1] ??
+      null;
+    const url = href
+      ? (href.startsWith("http") ? href : new URL(href, baseUrl).toString())
+      : null;
 
-      // 1) Intento con pickCards (ya normaliza precio con parsePriceCLP/pickPriceFromHtml)
-      let picked = await pickCards(page, cardsSelectors);
-      let mapped = (picked || []).map((r) => ({
-        store: "Dr. Simi",
-        name: normalize(r.name),
-        price: r.price,
-        img: null,
-        url: r.link || null,
-        stock: true,
-      }));
-
-      // 2) Si quedó vacío, hacemos un fallback más agresivo por patrón
-      if (!mapped.length) {
-        const raw = await page.$$eval(
-          cardsSelectors.cards,
-          (nodes) =>
-            nodes.map((card) => ({
-              text: (card.innerText || card.textContent || "").trim(),
-              html: card.outerHTML || "",
-              name:
-                (card.querySelector(".product-card__title") ||
-                  card.querySelector(".card__heading") ||
-                  card.querySelector(".product-item__title") ||
-                  card.querySelector(".product__title") ||
-                  card.querySelector(".product-title") ||
-                  card.querySelector("a[title]"))?.textContent?.trim() || null,
-              href:
-                (card.querySelector("a.product-card__link") ||
-                  card.querySelector(".card__heading a") ||
-                  card.querySelector("a[href*='/products/']") ||
-                  card.querySelector("a[href^='/']"))?.href || null,
-              img:
-                (card.querySelector("img") ||
-                  card.querySelector("picture img"))?.src || null,
-            })) || []
-        ).catch(() => []);
-
-        mapped = raw
-          .map((it) => {
-            const name = normalize(it.name);
-            const price =
-              parsePriceCLP(it.text) ?? pickPriceFromHtml(it.html);
-            return {
-              store: "Dr. Simi",
-              name,
-              price: price ?? null,
-              img: it.img || null,
-              url: it.href || null,
-              stock: true,
-            };
-          })
-          .filter((x) => x.name && Number.isFinite(x.price) && x.price > 0);
-      }
-
-      all.push(...mapped);
-      if (all.length >= 40) break;
-    }
-
-    // De-dup por (name|price)
-    const seen = new Set();
-    const dedup = [];
-    for (const r of all) {
-      const key = `${r.name}|${r.price}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        dedup.push(r);
-      }
-      if (dedup.length >= 40) break;
-    }
-
-    return dedup;
-  } catch (e) {
-    if (process.env.DEBUG_PRICES) {
-      console.error("[Dr. Simi] scraper error:", e?.message || e);
-    }
-    return [];
-  } finally {
-    try { await page?.close(); } catch {}
-    await browser.close();
+    // Filtrado básico
+    if (!name) continue;
+    // Evitar tarjetas sin precio cuando claramente son banners, etc
+    // (igual dejamos algunas sin precio porque el sitio puede ocultarlo con JS).
+    items.push({ chain: "drsimi", name, price: price ?? null, url });
+    if (items.length >= 30) break;
   }
+
+  // 2) Si no encontramos nada con la estrategia anterior, busquemos anchors
+  // con texto y un precio cerca (más laxo).
+  if (items.length === 0) {
+    const rowRegex = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let r;
+    while ((r = rowRegex.exec(html))) {
+      const href = r[1];
+      const content = r[2];
+      const name = content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      if (!name || name.length < 3) continue;
+
+      const near = html.slice(Math.max(0, r.index - 400), r.index + content.length + 400);
+      const priceRaw =
+        near.match(/\$\s?\d{1,3}([.\s]\d{3})+([,\.]\d{1,2})?/i)?.[0] ??
+        near.match(/\b\d{1,3}([.\s]\d{3})+([,\.]\d{1,2})?\b/)?.[0] ??
+        null;
+      const price = priceCLPnum(priceRaw);
+
+      const url = href
+        ? (href.startsWith("http") ? href : new URL(href, baseUrl).toString())
+        : null;
+
+      // Guardamos aunque no haya price (puede mostrarse con JS)
+      items.push({ chain: "drsimi", name, price: price ?? null, url });
+      if (items.length >= 30) break;
+    }
+  }
+
+  // Dedup por name+price
+  const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    const k = `${normalize(it.name)}|${it.price ?? "x"}`;
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(it);
+    }
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+export async function searchDrSimi(q) {
+  const urls = candidateSearchUrls(q);
+  const hdrs = headers("https://www.drsimi.cl", "text/html,*/*");
+  for (const url of urls) {
+    try {
+      const r = await getText(url, hdrs);
+      if (r.status >= 200 && r.status < 300 && (r.text || "").length > 0) {
+        const items = parseHtmlToItems(r.text, url);
+        if (items.length) {
+          // Normaliza el nombre (igual que otras cadenas)
+          return items.map((x) => ({
+            chain: "drsimi",
+            name: x.name,
+            price: x.price,
+            url: x.url ?? url,
+          }));
+        }
+      }
+    } catch {
+      // probar siguiente URL
+    }
+  }
+  return []; // no hallado (el caller rellenará “sin información”)
 }
