@@ -114,4 +114,367 @@ function estimatedPriceCLP(query, chainKey) {
     return null;
   }
 
-  // para otros medi
+  // para otros medicamentos, podríamos devolver algo razonable más adelante;
+  // por ahora solo Dr Simi / Farmaexpress con paracetamol 500.
+  if (chainKey === "drsimi") return 1990;
+  if (chainKey === "farmaexpress") return 2490;
+  return null;
+}
+
+// -------------------- Health --------------------
+app.get("/", (_req, res) =>
+  res.type("text/plain").send("VIDESAPP API – OK")
+);
+
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "videsapp-api",
+    build: BUILD,
+    commit: COMMIT,
+    port: PORT,
+    node: process.version,
+    time: new Date().toISOString(),
+  });
+});
+
+// Ping específico para la app Flutter
+app.get("/api/ping", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "videsapp-api",
+    endpoint: "/api/prices",
+    build: BUILD,
+    time: new Date().toISOString(),
+  });
+});
+
+app.get("/prices-lite-ping", (_req, res) => {
+  res.json({ ok: true, ping: "prices-lite", build: BUILD });
+});
+
+// -------------------- precios-lite (JSON nativo de chainsLite) --------------------
+app.get("/prices-lite", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+    const data = await searchChainPricesLite(q, { lat, lng });
+    res.json(data);
+  } catch (err) {
+    res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// Compat: /search2 -> precios-lite (mismo formato reducido)
+app.get("/search2", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+    const data = await searchChainPricesLite(q, { lat, lng });
+    res.json({ ok: true, q, count: data.count, items: data.items });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// -------------------- federado (Top-1 por cadena) --------------------
+// Intenta fetchFederated.js; si falla, hace fallback a prices-lite
+app.get("/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+
+    const lat = Number(req.query.lat || process.env.GEO_LAT || -33.4489);
+    const lng = Number(req.query.lng || process.env.GEO_LNG || -70.6693);
+    const mapsKey = process.env.GOOGLE_MAPS_API_KEY || "";
+
+    let results = null;
+    try {
+      const { searchFederated } = await import("./fetchFederated.js");
+      results = await searchFederated({ q, lat, lng, mapsKey });
+    } catch (_e) {
+      const lite = await searchChainPricesLite(q, { lat, lng });
+      const found = (lite.items || []).map((it) => ({
+        pharmacy: (it.chain || "").toLowerCase(),
+        name: it.name || "—",
+        price: it.price ?? null,
+        distance_km: it.nearest_km ?? null,
+        maps_url: it.nearest_maps_url ?? null,
+      }));
+      const want = [
+        "ahumada",
+        "cruzverde",
+        "salcobrand",
+        "drsimi",
+        "farmaexpress",
+      ];
+      const have = new Set(found.map((x) => x.pharmacy));
+      const blanks = want
+        .filter((p) => !have.has(p))
+        .map((p) => ({
+          pharmacy: p,
+          name:
+            p.charAt(0).toUpperCase() + p.slice(1) + " — sin información",
+          price: null,
+          distance_km: null,
+          maps_url: null,
+        }));
+      results = [...found, ...blanks];
+    }
+
+    res.json({
+      ok: true,
+      q,
+      count: results.length,
+      items: results,
+    });
+  } catch (err) {
+    console.error("Error en /search", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// -------------------- API oficial esperada por la app --------------------
+// Usa stores.json para localizar sucursales cercanas y arma datos tipo PriceQuote.
+// Precios reales: solo Dr. Simi y Farmaexpress (estimados); otras cadenas sin precio.
+//
+// OPTIMIZADO para:
+// - Loguear entrada y salida (para ver tiempos reales).
+// - Usar un único pase sobre stores.json y reutilizar la distancia.
+// - Respetar (si viene) el parámetro radius en metros.
+app.get("/api/prices", async (req, res) => {
+  const started = Date.now();
+  console.log("[/api/prices] HIT", new Date().toISOString(), req.query);
+
+  try {
+    const q = String(req.query.q || req.query.product || "").trim();
+    const lat = req.query.lat ? Number(req.query.lat) : null;
+    const lng = req.query.lng ? Number(req.query.lng) : null;
+    const radiusMeters = req.query.radius
+      ? Number(req.query.radius)
+      : null;
+
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+
+    const chainsOrder = [
+      "ahumada",
+      "cruzverde",
+      "drsimi",
+      "salcobrand",
+      "farmaexpress",
+    ];
+    const nowIso = new Date().toISOString();
+
+    // Distancia máxima en km (si envías radius en metros, lo usamos; si no, 10km por defecto)
+    let maxDistKm = 10;
+    if (Number.isFinite(radiusMeters) && radiusMeters > 0) {
+      maxDistKm = Math.min(radiusMeters / 1000, 50); // cap en 50km por seguridad
+    }
+
+    let stores = [];
+    let bestByChain = {};
+
+    const user =
+      Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+
+    if (user) {
+      try {
+        stores = await loadStores();
+      } catch (e) {
+        console.error("No se pudo cargar stores.json:", e);
+      }
+    }
+
+    // Un solo pase por stores.json:
+    if (user && Array.isArray(stores) && stores.length) {
+      for (const s of stores) {
+        if (typeof s.lat !== "number" || typeof s.lng !== "number") continue;
+
+        const km = kmBetween(user, { lat: s.lat, lng: s.lng });
+        if (!Number.isFinite(km)) continue;
+        if (km > maxDistKm) continue; // fuera del radio permitido
+
+        const brand = s.brand || "";
+        const nb = norm(brand);
+
+        for (const key of chainsOrder) {
+          const meta = CHAIN_META[key];
+          if (!meta) continue;
+          const targetKey = norm(meta.chainName || key);
+
+          if (!nb.includes(targetKey) && !targetKey.includes(nb)) continue;
+
+          const current = bestByChain[key];
+          if (!current || km < current.km) {
+            bestByChain[key] = { store: s, km };
+          }
+        }
+      }
+    }
+
+    const items = [];
+    for (const key of chainsOrder) {
+      const meta = CHAIN_META[key];
+      if (!meta) continue;
+
+      let storeName = null;
+      let distanceKm = null;
+      let mapsUrl = null;
+
+      const best = bestByChain[key];
+      if (best && best.store) {
+        const s = best.store;
+        storeName = s.name || s.brand || meta.chainName;
+        distanceKm = Math.round(best.km * 10) / 10;
+        mapsUrl = mapsLink(
+          s.lat,
+          s.lng,
+          `${storeName} ${s.address || ""}`.trim()
+        );
+      }
+
+      const price = estimatedPriceCLP(q, key); // null para cadenas sin precio
+      const buyUrl = meta.searchUrl(q);
+
+      items.push({
+        chainName: meta.chainName,
+        price,
+        inStock: true,
+        storeName,
+        distanceKm,
+        logoUrl: meta.logoUrl,
+        buyUrl,
+        updatedAt: nowIso,
+        mapsUrl,
+        productName: q,
+      });
+    }
+
+    const elapsed = Date.now() - started;
+    console.log(
+      "[/api/prices] DONE",
+      elapsed + "ms",
+      "items=" + items.length
+    );
+
+    res.json({
+      ok: true,
+      q,
+      count: items.length,
+      items,
+      lat,
+      lng,
+      radiusMeters,
+      maxDistKm,
+      _query_used: q,
+    });
+  } catch (e) {
+    const elapsed = Date.now() - started;
+    console.error("[/api/prices] ERROR", elapsed + "ms", e);
+    res
+      .status(500)
+      .json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// -------------------- nearby --------------------
+app.get("/nearby", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "lat_lng_required" });
+    }
+
+    const prices = await searchChainPricesLite(q, { lat, lng });
+    const stores = await loadStores();
+
+    const user = { lat, lng };
+    const rows = [];
+    for (const it of prices.items || []) {
+      const chain = it.chain || "";
+      const nc = norm(chain);
+      const pool = stores.filter((s) => {
+        const nb = norm(s.brand);
+        return nb.includes(nc) || nc.includes(nb);
+      });
+      if (!pool.length) continue;
+
+      let best = null,
+        bestKm = Infinity;
+      for (const s of pool) {
+        const km = kmBetween(user, { lat: s.lat, lng: s.lng });
+        if (km < bestKm) {
+          bestKm = km;
+          best = s;
+        }
+      }
+      if (!best) continue;
+
+      rows.push({
+        brand: chain,
+        price: it.price ?? null,
+        storeName: best.name,
+        address: best.address,
+        distance_km: Math.round(bestKm * 10) / 10,
+        mapsUrl: mapsLink(
+          best.lat,
+          best.lng,
+          `${best.name} ${best.address}`
+        ),
+        productUrl: it.url || null,
+      });
+    }
+
+    rows.sort((a, b) => {
+      if (a.price && b.price) return a.price - b.price;
+      if (a.price) return -1;
+      if (b.price) return 1;
+      return a.distance_km - b.distance_km;
+    });
+
+    res.json({ ok: true, q, count: rows.length, items: rows });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// -------------------- 404 --------------------
+app.use((req, res) =>
+  res.status(404).json({ ok: false, error: "not_found", path: req.path })
+);
+
+// -------------------- start & shutdown --------------------
+const server = app.listen(PORT, "0.0.0.0", () =>
+  console.log(
+    `✅ Server listening on http://0.0.0.0:${PORT}`,
+    { BUILD, COMMIT }
+  )
+);
+// sube el timeout a 30s (útil en Render cold start)
+server.setTimeout?.(30000);
+
+function shutdown() {
+  try {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000);
+  } catch {
+    process.exit(0);
+  }
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
