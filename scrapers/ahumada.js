@@ -7,6 +7,8 @@ import {
   parsePriceCLP,
   pickPriceFromHtml,
   setPageDefaults,
+  tryVtexSearch,
+  tryCloseRegionModal,
 } from "./utils.js";
 
 export const sourceId = "ahumada";
@@ -31,6 +33,7 @@ export async function fetchAhumada(
 
   let page;
   try {
+    const started = Date.now();
     page = await browser.newPage();
     await setPageDefaults(page);
 
@@ -39,79 +42,133 @@ export async function fetchAhumada(
     )}`;
 
     const ok = await safeGoto(page, url, 25000);
-    if (!ok) return [];
+    if (!ok) {
+      if (process.env.DEBUG_PRICES) {
+        console.error("[Ahumada] safeGoto falló para URL:", url);
+      }
+      return [];
+    }
 
+    // Cerrar cookies / modales de región si aparecen
     await tryDismissCookieBanners(page);
-    await page.waitForTimeout(1500);
+    await tryCloseRegionModal(page);
+    await page.waitForTimeout(1200);
+
+    // Scrolleo para asegurar carga lazy
     await autoScroll(page, { steps: 8, delay: 250 });
-    await page.waitForTimeout(800); // deja cargar precios/lazy
+    await page.waitForTimeout(800);
 
-    const raw = await page.evaluate(() => {
-      const sels = [
-        ".product-item",
-        ".product-item-info",
-        "li.product",
-        ".product-card",
-        ".item.product",
-      ];
-      const cards = document.querySelectorAll(sels.join(","));
-      const out = [];
-      cards.forEach((card) => {
-        const titleEl =
-          card.querySelector(".product-item-link") ||
-          card.querySelector(".product-item-name a") ||
-          card.querySelector("a.product-item-link") ||
-          card.querySelector("a[title]");
+    const results = [];
 
-        const linkEl =
-          card.querySelector("a.product-item-link") ||
-          card.querySelector("a[href*='/']");
+    // 1) Intento VTEX (muchas farmacias usan VTEX atrás)
+    let vtexItems = [];
+    try {
+      vtexItems = await tryVtexSearch(page, q, (p) => p); // p: { title, price, url }
+    } catch (e) {
+      if (process.env.DEBUG_PRICES) {
+        console.error("[Ahumada] Error en tryVtexSearch:", e);
+      }
+    }
 
-        const imgEl =
-          card.querySelector("img") || card.querySelector("source, picture img");
+    if (Array.isArray(vtexItems) && vtexItems.length) {
+      for (const item of vtexItems) {
+        const priceNum = parsePriceCLP(item.price ?? item.priceRaw ?? item.priceCLP ?? item);
+        if (!priceNum || priceNum < 100 || priceNum > 500000) continue;
 
-        out.push({
-          title: titleEl?.textContent?.trim() || null,
-          href: linkEl?.href || null,
-          img: imgEl?.src || null,
-          text: (card.innerText || card.textContent || "").trim(),
-          html: card.outerHTML || "",
-        });
-      });
-      return out;
-    });
+        const name = normalize(item.title || item.name || q);
+        if (!name) continue;
 
-    const mapped = raw
-      .map((it) => {
-        const name = normalize(it.title);
-        let price =
-          parsePriceCLP(it.text) ??
-          // fallback: escanea HTML
-          pickPriceFromHtml(it.html);
-
-        if (price && (price < 100 || price > 500000)) price = null;
-
-        return {
+        results.push({
           store: "Ahumada",
           name,
-          price: price ?? null,
-          img: it.img || null,
-          url: it.href || null,
+          price: priceNum,
+          img: item.img || null,
+          url: item.url || null,
           stock: true,
-        };
-      })
-      .filter((x) => x.name && Number.isFinite(x.price) && x.price > 0);
+        });
+      }
+    }
+
+    // 2) Fallback DOM: tarjetas de producto (por si VTEX no dio nada)
+    if (!results.length) {
+      const raw = await page.evaluate(() => {
+        const sels = [
+          ".product-item",
+          ".product-item-info",
+          "li.product",
+          ".product-card",
+          ".item.product",
+          '[class*="product"] article',
+        ];
+        const cards = document.querySelectorAll(sels.join(","));
+        const out = [];
+        cards.forEach((card) => {
+          const titleEl =
+            card.querySelector(".product-item-link") ||
+            card.querySelector(".product-item-name a") ||
+            card.querySelector("a.product-item-link") ||
+            card.querySelector("a[title]") ||
+            card.querySelector("h2 a, h3 a, h2, h3");
+
+          const linkEl =
+            card.querySelector("a.product-item-link") ||
+            card.querySelector("a[href*='/']");
+
+          const imgEl =
+            card.querySelector("img") || card.querySelector("source, picture img");
+
+          out.push({
+            title: titleEl?.textContent?.trim() || null,
+            href: linkEl?.href || null,
+            img: imgEl?.src || null,
+            text: (card.innerText || card.textContent || "").trim(),
+            html: card.outerHTML || "",
+          });
+        });
+        return out;
+      });
+
+      const mapped = raw
+        .map((it) => {
+          const name = normalize(it.title);
+          let price =
+            parsePriceCLP(it.text) ??
+            // fallback: escanea HTML
+            pickPriceFromHtml(it.html);
+
+          if (price && (price < 100 || price > 500000)) price = null;
+
+          return {
+            store: "Ahumada",
+            name,
+            price: price ?? null,
+            img: it.img || null,
+            url: it.href || null,
+            stock: true,
+          };
+        })
+        .filter((x) => x.name && Number.isFinite(x.price) && x.price > 0);
+
+      // Merge con results por si el día de mañana usamos ambos
+      results.push(...mapped);
+    }
 
     // dedupe por name+price y limita a 40
     const seen = new Set();
     const dedup = [];
-    for (const r of mapped) {
+    for (const r of results) {
       const key = `${r.name}|${r.price}`;
       if (!seen.has(key)) {
         seen.add(key);
         dedup.push(r);
       }
       if (dedup.length >= 40) break;
+    }
+
+    if (process.env.DEBUG_PRICES) {
+      console.log(
+        `[Ahumada] q="${q}" -> VTEX=${Array.isArray(vtexItems) ? vtexItems.length : 0} items, final=${dedup.length} items, took=${Date.now() - started}ms`
+      );
     }
 
     return dedup;
