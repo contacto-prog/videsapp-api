@@ -1,131 +1,135 @@
-// scrapers/chainsLite.js — versión sin cheerio, usando Google + Jina
+// scrapers/chainsLite.js
+// 👉 Nueva versión: usa scrapers Puppeteer en vez de Google + Jina
 
-const HOST_TO_CHAIN = {
-  'cruzverde.cl': 'Cruz Verde',
-  'www.cruzverde.cl': 'Cruz Verde',
-  'farmaciasahumada.cl': 'Ahumada',
-  'www.farmaciasahumada.cl': 'Ahumada',
-  'salcobrand.cl': 'Salcobrand',
-  'www.salcobrand.cl': 'Salcobrand',
-  'farmex.cl': 'Farmaexpress',
-  'www.farmex.cl': 'Farmaexpress',
-  'drsimi.cl': 'Dr. Simi',
-  'www.drsimi.cl': 'Dr. Simi',
-  'cofar.cl': 'Cofar',
-  'www.cofar.cl': 'Cofar',
-  'ecofarmacias.cl': 'EcoFarmacias',
-  'www.ecofarmacias.cl': 'EcoFarmacias',
-  'novasalud.cl': 'Novasalud',
-  'www.novasalud.cl': 'Novasalud',
-  'recetasolidaria.cl': 'Receta Solidaria',
-  'www.recetasolidaria.cl': 'Receta Solidaria'
-};
+import puppeteer from "puppeteer";
 
-function parsePrice(s) {
-  if (!s) return null;
-  const m = s.replace(/\u00A0/g, ' ').match(/(?:CLP\s*)?\$?\s*([\d\.]{3,})/i);
-  if (!m) return null;
-  const n = parseInt(m[1].replace(/[^\d]/g, ''), 10);
-  if (!Number.isFinite(n) || n < 200 || n > 1000000) return null;
-  return n;
+import { fetchAhumada, sourceId as ahumadaId } from "./ahumada.js";
+import { fetchCruzVerde, sourceId as cruzVerdeId } from "./cruzverde.js";
+import { fetchSalcobrand, sourceId as salcobrandId } from "./salcobrand.js";
+import { fetchDrSimi, sourceId as drsimiId } from "./drsimi.js";
+import {
+  fetchFarmaexpress,
+  sourceId as farmaexpressId,
+} from "./farmaexpress.js";
+
+// Si alguno de estos archivos todavía no expone `fetchXXX` y `sourceId`,
+// solo tienes que seguir el mismo patrón que en ahumada.js.
+
+const SOURCES = [
+  { id: ahumadaId, label: "Ahumada", fetcher: fetchAhumada },
+  { id: cruzVerdeId, label: "Cruz Verde", fetcher: fetchCruzVerde },
+  { id: salcobrandId, label: "Salcobrand", fetcher: fetchSalcobrand },
+  { id: drsimiId, label: "Dr. Simi", fetcher: fetchDrSimi },
+  { id: farmaexpressId, label: "Farmaexpress", fetcher: fetchFarmaexpress },
+];
+
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error("timeout")), ms);
+    promise
+      .then((res) => {
+        clearTimeout(id);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(id);
+        reject(err);
+      });
+  });
 }
 
-function mkMapsUrl(chain, lat = null, lng = null) {
-  const base = 'https://www.google.com/maps/dir/?api=1';
-  const dest = encodeURIComponent('Farmacia ' + chain);
-  if (lat != null && lng != null) {
-    return `${base}&destination=${dest}&origin=${lat},${lng}&travelmode=driving`;
-  }
-  return `${base}&destination=${dest}&travelmode=driving`;
-}
-
-async function fetchWithTimeout(url, { timeoutMs = 8000, headers = {} } = {}) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(new Error('timeout')), timeoutMs);
-  try {
-    const res = await fetch(url, { headers, signal: ac.signal });
-    const txt = await res.text();
-    return txt;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-function* windowed(arr, w) {
-  for (let i = 0; i < arr.length; i++) {
-    const start = Math.max(0, i - w);
-    const end = Math.min(arr.length, i + w + 1);
-    yield arr.slice(start, end).join(' ');
-  }
-}
-
-export async function searchChainPricesLite(q, { lat = null, lng = null } = {}) {
-  const start = Date.now();
+/**
+ * Búsqueda federada: consulta todas las cadenas con scrapers reales.
+ * Mantiene la misma firma que la versión anterior para no romper server.js.
+ *
+ * Devuelve:
+ *   { ok, query, count, items: [{ chain, name, price, url }] }
+ */
+export async function searchChainPricesLite(
+  q,
+  { lat = null, lng = null } = {}
+) {
+  const started = Date.now();
   const HARD_LIMIT_MS = 12000;
 
-  const query = q + ' precio (site:cruzverde.cl OR site:farmaciasahumada.cl OR site:salcobrand.cl OR site:farmex.cl OR site:drsimi.cl)';
-  const url =
-    `https://r.jina.ai/http://www.google.com/search?q=${encodeURIComponent(query)}&hl=es-CL&num=30`;
+  if (!q || !q.trim()) {
+    return { ok: false, error: "q_required", query: q, count: 0, items: [] };
+  }
 
-  let text = '';
+  const query = q.trim();
+
   try {
-    text = await fetchWithTimeout(url, {
-      timeoutMs: 9000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8',
-      },
-    });
-  } catch (_e) {
-    return { ok: true, query: q, count: 0, items: [], note: 'timeout_or_fetch_error' };
-  }
+    const perSource = await Promise.all(
+      SOURCES.map(async (src) => {
+        try {
+          const rows = await withTimeout(
+            src.fetcher(query, {
+              puppeteer,
+              headless: "new",
+              executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+            }),
+            9000
+          );
 
-  if (Date.now() - start > HARD_LIMIT_MS) {
-    return { ok: true, query: q, count: 0, items: [], note: 'hard_limit_exceeded' };
-  }
+          return rows.map((r) => ({
+            chain: src.label,            // "Ahumada", "Cruz Verde", etc.
+            name: r.name || query,
+            price: r.price ?? null,
+            url: r.url || null,
+            // mapsUrl / nearest_km no se calculan aquí; server.js usa stores.json
+          }));
+        } catch (e) {
+          if (process.env.DEBUG_PRICES) {
+            console.error(`[chainsLite] Error en scraper ${src.id}:`, e);
+          }
+          return [];
+        }
+      })
+    );
 
-  const lines = text
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+    const flat = perSource.flat();
 
-  const items = [];
-  for (const chunk of windowed(lines, 3)) {
-    const urls = [...chunk.matchAll(/https?:\/\/[^\s\)\]]+/g)].map((m) => m[0]);
-    if (!urls.length) continue;
-    const price = parsePrice(chunk);
-    if (!price) continue;
-
-    for (const u of urls) {
-      let host = '';
-      try {
-        host = new URL(u).host;
-      } catch {}
-      const chain = HOST_TO_CHAIN[host];
-      if (!chain) continue;
-
-      items.push({
-        chain,
-        price,
-        url: u,
-        mapsUrl: mkMapsUrl(chain, lat, lng),
-      });
+    if (Date.now() - started > HARD_LIMIT_MS) {
+      return {
+        ok: true,
+        query,
+        count: 0,
+        items: [],
+        note: "hard_limit_exceeded",
+      };
     }
+
+    // Elegir mejor precio por cadena
+    const byChain = new Map();
+    for (const it of flat) {
+      if (it.price == null || !Number.isFinite(it.price)) continue;
+      const prev = byChain.get(it.chain);
+      if (!prev || it.price < prev.price) {
+        byChain.set(it.chain, it);
+      }
+    }
+
+    const uniq = Array.from(byChain.values()).sort(
+      (a, b) => a.price - b.price
+    );
+
+    return {
+      ok: true,
+      query,
+      count: uniq.length,
+      items: uniq,
+      took_ms: Date.now() - started,
+    };
+  } catch (e) {
+    if (process.env.DEBUG_PRICES) {
+      console.error("[chainsLite] Error general:", e);
+    }
+    return {
+      ok: false,
+      error: String(e?.message || e),
+      query,
+      count: 0,
+      items: [],
+    };
   }
-
-  const byChain = new Map();
-  for (const it of items) {
-    const prev = byChain.get(it.chain);
-    if (!prev || it.price < prev.price) byChain.set(it.chain, it);
-  }
-
-  const uniq = Array.from(byChain.values()).sort((a, b) => a.price - b.price);
-
-  return {
-    ok: true,
-    query: q,
-    count: uniq.length,
-    items: uniq.slice(0, 8),
-    took_ms: Date.now() - start,
-  };
 }
