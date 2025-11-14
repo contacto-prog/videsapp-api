@@ -6,7 +6,7 @@ import morgan from "morgan";
 import fs from "fs/promises";
 import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
-const BUILD  = "prices-lite-2025-11-14-scrapers";
+const BUILD  = "prices-lite-2025-11-14-scrapers-v1";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 const PORT   = process.env.PORT || 8080;
 
