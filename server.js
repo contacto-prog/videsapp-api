@@ -6,7 +6,7 @@ import morgan from "morgan";
 import fs from "fs/promises";
 import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
-const BUILD  = "prices-lite-2025-11-14-scrapers-v2";
+const BUILD  = "prices-lite-2025-11-14-scrapers-v3";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 const PORT   = process.env.PORT || 8080;
 
@@ -60,6 +60,14 @@ const norm = (s) =>
     .replace(/\./g, "")
     .replace(/\s+/g, "")
     .replace(/farmacia(s)?/g, "");
+
+function normalizePrice(p) {
+  if (p == null) return null;
+  const n = typeof p === "number" ? p : Number(p);
+  if (!Number.isFinite(n)) return null;
+  if (n <= 0) return null;
+  return Math.round(n);
+}
 
 // metadatos de cadenas para logos y links de búsqueda
 const CHAIN_META = {
@@ -124,7 +132,7 @@ app.get("/api/ping", (_req, res) => {
     service: "videsapp-api",
     endpoint: "/api/prices",
     build: BUILD,
-    mode: "scrapers-v2",
+    mode: "scrapers-v3",
     time: new Date().toISOString(),
   });
 });
@@ -218,8 +226,6 @@ app.get("/search", async (req, res) => {
 });
 
 // -------------------- /api/prices (API oficial para la app) --------------------
-// Usa scrapers (searchChainPricesLite) para obtener precios reales por cadena.
-// Si no hay precio para una cadena, igual la mostramos con logo + link de búsqueda.
 app.get("/api/prices", async (req, res) => {
   const started = Date.now();
   console.log("[/api/prices] HIT", new Date().toISOString(), req.query);
@@ -302,35 +308,44 @@ app.get("/api/prices", async (req, res) => {
         for (const key of chainsOrder) {
           const meta = CHAIN_META[key];
           if (!meta) continue;
-          const tk = norm(meta.chainName || key);
+          const tk = norm(meta.chainName || key); // ej: "cruzverde"
 
           if (!nc.includes(tk) && !tk.includes(nc)) continue;
 
           const current = scrapedByChain[key];
-          const candidatePrice =
-            typeof it.price === "number" ? it.price : Number(it.price) || null;
+          const candidatePrice = normalizePrice(it.price);
+          const mapsFromItem =
+            it.nearest_maps_url || it.mapsUrl || null;
+          const urlFromItem = it.url || null;
 
           if (!current) {
             scrapedByChain[key] = {
               name: it.name || rawChain,
               price: candidatePrice,
               nearest_km: it.nearest_km ?? null,
-              nearest_maps_url: it.nearest_maps_url ?? null,
+              nearest_maps_url: mapsFromItem,
+              url: urlFromItem,
             };
-          } else if (
-            candidatePrice != null &&
-            (current.price == null || candidatePrice < current.price)
-          ) {
-            scrapedByChain[key] = {
-              name: it.name || rawChain,
-              price: candidatePrice,
-              nearest_km: it.nearest_km ?? current.nearest_km ?? null,
-              nearest_maps_url:
-                it.nearest_maps_url ?? current.nearest_maps_url ?? null,
-            };
+          } else {
+            // Elegimos el precio más barato conocido
+            const oldPrice = current.price;
+            const better =
+              candidatePrice != null &&
+              (oldPrice == null || candidatePrice < oldPrice);
+            if (better) {
+              scrapedByChain[key] = {
+                name: it.name || rawChain,
+                price: candidatePrice,
+                nearest_km: it.nearest_km ?? current.nearest_km ?? null,
+                nearest_maps_url:
+                  mapsFromItem ?? current.nearest_maps_url ?? null,
+                url: urlFromItem ?? current.url ?? null,
+              };
+            }
           }
         }
       }
+      console.log("[/api/prices] SCRAPED", scrapedByChain);
     } catch (e) {
       console.error("Error en searchChainPricesLite dentro de /api/prices:", e);
     }
@@ -361,9 +376,11 @@ app.get("/api/prices", async (req, res) => {
       // info desde scrapers (si existe)
       const scraped = scrapedByChain[key];
       let price = null;
+      let buyUrl = meta.searchUrl(q); // fallback
+
       if (scraped) {
         if (scraped.price != null && scraped.price > 0) {
-          price = Math.round(scraped.price);
+          price = scraped.price;
         }
         if (scraped.name && !storeName) {
           storeName = scraped.name;
@@ -374,9 +391,10 @@ app.get("/api/prices", async (req, res) => {
         if (scraped.nearest_maps_url) {
           mapsUrl = scraped.nearest_maps_url;
         }
+        if (scraped.url) {
+          buyUrl = scraped.url;
+        }
       }
-
-      const buyUrl = meta.searchUrl(q);
 
       items.push({
         chainName: meta.chainName,
