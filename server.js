@@ -318,4 +318,201 @@ app.get("/api/prices", async (req, res) => {
               name: it.name || rawChain,
               price: candidatePrice,
               nearest_km: it.nearest_km ?? null,
-              nearest_maps_url: it.near
+              nearest_maps_url: it.nearest_maps_url ?? null,
+            };
+          } else {
+            if (
+              candidatePrice != null &&
+              (current.price == null || candidatePrice < current.price)
+            ) {
+              scrapedByChain[key] = {
+                name: it.name || rawChain,
+                price: candidatePrice,
+                nearest_km: it.nearest_km ?? current.nearest_km ?? null,
+                nearest_maps_url:
+                  it.nearest_maps_url ?? current.nearest_maps_url ?? null,
+              };
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error en searchChainPricesLite dentro de /api/prices:", e);
+    }
+
+    // 3) Armar respuesta final por cadena
+    const items = [];
+    for (const key of chainsOrder) {
+      const meta = CHAIN_META[key];
+      if (!meta) continue;
+
+      let storeName = null;
+      let distanceKm = null;
+      let mapsUrl = null;
+
+      // info desde stores.json (fallback local por cadena)
+      const best = bestByChain[key];
+      if (best && best.store) {
+        const s = best.store;
+        storeName = s.name || s.brand || meta.chainName;
+        distanceKm = Math.round(best.km * 10) / 10;
+        mapsUrl = mapsLink(
+          s.lat,
+          s.lng,
+          `${storeName} ${s.address || ""}`.trim()
+        );
+      }
+
+      // info desde scrapers (si existe)
+      const scraped = scrapedByChain[key];
+      let price = null;
+      if (scraped) {
+        if (scraped.price != null && scraped.price > 0) {
+          price = Math.round(scraped.price);
+        }
+        if (scraped.name && !storeName) {
+          storeName = scraped.name;
+        }
+        if (scraped.nearest_km != null && scraped.nearest_km > 0) {
+          distanceKm = Math.round(scraped.nearest_km * 10) / 10;
+        }
+        if (scraped.nearest_maps_url) {
+          mapsUrl = scraped.nearest_maps_url;
+        }
+      }
+
+      const buyUrl = meta.searchUrl(q);
+
+      items.push({
+        chainName: meta.chainName,
+        price,                    // null si no hay precio real encontrado
+        inStock: price != null,   // si hay precio, asumimos stock; si no, UI muestra "Ver disponibilidad online"
+        storeName,
+        distanceKm,
+        logoUrl: meta.logoUrl,
+        buyUrl,
+        updatedAt: nowIso,
+        mapsUrl,
+        productName: q,
+      });
+    }
+
+    const elapsed = Date.now() - started;
+    console.log(
+      "[/api/prices] DONE",
+      elapsed + "ms",
+      "items=" + items.length
+    );
+
+    res.json({
+      ok: true,
+      q,
+      count: items.length,
+      items,
+      lat,
+      lng,
+      radiusMeters,
+      maxDistKm,
+      _query_used: q,
+    });
+  } catch (e) {
+    const elapsed = Date.now() - started;
+    console.error("[/api/prices] ERROR", elapsed + "ms", e);
+    res
+      .status(500)
+      .json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// -------------------- nearby --------------------
+app.get("/nearby", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "lat_lng_required" });
+    }
+
+    const prices = await searchChainPricesLite(q, { lat, lng });
+    const stores = await loadStores();
+
+    const user = { lat, lng };
+    const rows = [];
+    for (const it of prices.items || []) {
+      const chain = it.chain || "";
+      const nc = norm(chain);
+      const pool = stores.filter((s) => {
+        const nb = norm(s.brand);
+        return nb.includes(nc) || nc.includes(nb);
+      });
+      if (!pool.length) continue;
+
+      let best = null,
+        bestKm = Infinity;
+      for (const s of pool) {
+        const km = kmBetween(user, { lat: s.lat, lng: s.lng });
+        if (km < bestKm) {
+          bestKm = km;
+          best = s;
+        }
+      }
+      if (!best) continue;
+
+      rows.push({
+        brand: chain,
+        price: it.price ?? null,
+        storeName: best.name,
+        address: best.address,
+        distance_km: Math.round(bestKm * 10) / 10,
+        mapsUrl: mapsLink(
+          best.lat,
+          best.lng,
+          `${best.name} ${best.address}`
+        ),
+        productUrl: it.url || null,
+      });
+    }
+
+    rows.sort((a, b) => {
+      if (a.price && b.price) return a.price - b.price;
+      if (a.price) return -1;
+      if (b.price) return 1;
+      return a.distance_km - b.distance_km;
+    });
+
+    res.json({ ok: true, q, count: rows.length, items: rows });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// -------------------- 404 --------------------
+app.use((req, res) =>
+  res.status(404).json({ ok: false, error: "not_found", path: req.path })
+);
+
+// -------------------- start & shutdown --------------------
+const server = app.listen(PORT, "0.0.0.0", () =>
+  console.log(
+    `✅ Server listening on http://0.0.0.0:${PORT}`,
+    { BUILD, COMMIT }
+  )
+);
+server.setTimeout?.(30000);
+
+function shutdown() {
+  try {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000);
+  } catch {
+    process.exit(0);
+  }
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
