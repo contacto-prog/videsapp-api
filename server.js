@@ -6,7 +6,7 @@ import morgan from "morgan";
 import fs from "fs/promises";
 import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
-const BUILD  = "prices-lite-2025-11-14-scrapers-v1";
+const BUILD  = "prices-lite-2025-11-14-scrapers-v2";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 const PORT   = process.env.PORT || 8080;
 
@@ -118,14 +118,13 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// Ping específico para la app Flutter
 app.get("/api/ping", (_req, res) => {
   res.json({
     ok: true,
     service: "videsapp-api",
     endpoint: "/api/prices",
     build: BUILD,
-    mode: "scrapers-v1",
+    mode: "scrapers-v2",
     time: new Date().toISOString(),
   });
 });
@@ -144,9 +143,7 @@ app.get("/prices-lite", async (req, res) => {
     const data = await searchChainPricesLite(q, { lat, lng });
     res.json(data);
   } catch (err) {
-    res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
@@ -160,9 +157,7 @@ app.get("/search2", async (req, res) => {
     const data = await searchChainPricesLite(q, { lat, lng });
     res.json({ ok: true, q, count: data.count, items: data.items });
   } catch (err) {
-    res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
@@ -222,7 +217,7 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// -------------------- API oficial esperada por la app --------------------
+// -------------------- /api/prices (API oficial para la app) --------------------
 // Usa scrapers (searchChainPricesLite) para obtener precios reales por cadena.
 // Si no hay precio para una cadena, igual la mostramos con logo + link de búsqueda.
 app.get("/api/prices", async (req, res) => {
@@ -237,7 +232,9 @@ app.get("/api/prices", async (req, res) => {
       ? Number(req.query.radius)
       : null;
 
-    if (!q) return res.status(400).json({ ok: false, error: "q_required" });
+    if (!q) {
+      return res.status(400).json({ ok: false, error: "q_required" });
+    }
 
     const chainsOrder = [
       "ahumada",
@@ -248,17 +245,17 @@ app.get("/api/prices", async (req, res) => {
     ];
     const nowIso = new Date().toISOString();
 
-    // Distancia máxima en km (si envías radius en metros, lo usamos; si no, 10km por defecto)
+    // Distancia máxima en km (radius en metros -> km; default 10, cap 50)
     let maxDistKm = 10;
     if (Number.isFinite(radiusMeters) && radiusMeters > 0) {
       maxDistKm = Math.min(radiusMeters / 1000, 50);
     }
 
-    // 1) Cargar stores.json (para fallback de distancia/sucursal)
+    // 1) Cargar stores.json (para localizar sucursal cercana por cadena)
     let stores = [];
-    let bestByChain = {};
     const user =
       Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+    const bestByChain = {};
 
     if (user) {
       try {
@@ -295,7 +292,7 @@ app.get("/api/prices", async (req, res) => {
     }
 
     // 2) Llamar a scrapers (prices-lite) para obtener precios reales
-    let scrapedByChain = {};
+    const scrapedByChain = {};
     try {
       const lite = await searchChainPricesLite(q, { lat, lng });
       for (const it of lite.items || []) {
@@ -320,19 +317,17 @@ app.get("/api/prices", async (req, res) => {
               nearest_km: it.nearest_km ?? null,
               nearest_maps_url: it.nearest_maps_url ?? null,
             };
-          } else {
-            if (
-              candidatePrice != null &&
-              (current.price == null || candidatePrice < current.price)
-            ) {
-              scrapedByChain[key] = {
-                name: it.name || rawChain,
-                price: candidatePrice,
-                nearest_km: it.nearest_km ?? current.nearest_km ?? null,
-                nearest_maps_url:
-                  it.nearest_maps_url ?? current.nearest_maps_url ?? null,
-              };
-            }
+          } else if (
+            candidatePrice != null &&
+            (current.price == null || candidatePrice < current.price)
+          ) {
+            scrapedByChain[key] = {
+              name: it.name || rawChain,
+              price: candidatePrice,
+              nearest_km: it.nearest_km ?? current.nearest_km ?? null,
+              nearest_maps_url:
+                it.nearest_maps_url ?? current.nearest_maps_url ?? null,
+            };
           }
         }
       }
@@ -386,7 +381,7 @@ app.get("/api/prices", async (req, res) => {
       items.push({
         chainName: meta.chainName,
         price,                    // null si no hay precio real encontrado
-        inStock: price != null,   // si hay precio, asumimos stock; si no, UI muestra "Ver disponibilidad online"
+        inStock: price != null,   // si hay precio, asumimos stock; si no, la app muestra "Ver disponibilidad online"
         storeName,
         distanceKm,
         logoUrl: meta.logoUrl,
@@ -418,9 +413,7 @@ app.get("/api/prices", async (req, res) => {
   } catch (e) {
     const elapsed = Date.now() - started;
     console.error("[/api/prices] ERROR", elapsed + "ms", e);
-    res
-      .status(500)
-      .json({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
