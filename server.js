@@ -17,7 +17,6 @@ app.use(compression());
 app.use(morgan("tiny"));
 
 // Timeout defensivo (respuesta 504 si algo se cuelga)
-// Lo subimos a 30s para alinearlo mejor con el timeout de Flutter.
 app.use((req, res, next) => {
   res.setTimeout(30000, () => {
     try {
@@ -89,7 +88,6 @@ const CHAIN_META = {
     key: "drsimi",
     chainName: "Dr. Simi",
     logoUrl: "https://static-videsapp.s3.amazonaws.com/logos/drsimi.png",
-    // usamos búsqueda del sitio (o Google site:drsimi.cl)
     searchUrl: (q) =>
       `https://www.google.com/search?q=${encodeURIComponent(
         `site:drsimi.cl ${q}`
@@ -102,24 +100,6 @@ const CHAIN_META = {
     searchUrl: (q) => `https://farmex.cl/search?q=${encodeURIComponent(q)}`,
   },
 };
-
-// estimación simple de precio solo para cadenas que queremos mostrar precio
-function estimatedPriceCLP(query, chainKey) {
-  const q = String(query || "").toLowerCase();
-  const isParacetamol = q.includes("paracetamol") && q.includes("500");
-
-  if (isParacetamol) {
-    if (chainKey === "drsimi") return 500; // referencia barata
-    if (chainKey === "farmaexpress") return 790; // referencia similar a lo que viste
-    return null;
-  }
-
-  // para otros medicamentos, podríamos devolver algo razonable más adelante;
-  // por ahora solo Dr Simi / Farmaexpress con paracetamol 500.
-  if (chainKey === "drsimi") return 1990;
-  if (chainKey === "farmaexpress") return 2490;
-  return null;
-}
 
 // -------------------- Health --------------------
 app.get("/", (_req, res) =>
@@ -186,7 +166,6 @@ app.get("/search2", async (req, res) => {
 });
 
 // -------------------- federado (Top-1 por cadena) --------------------
-// Intenta fetchFederated.js; si falla, hace fallback a prices-lite
 app.get("/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -243,13 +222,8 @@ app.get("/search", async (req, res) => {
 });
 
 // -------------------- API oficial esperada por la app --------------------
-// Usa stores.json para localizar sucursales cercanas y arma datos tipo PriceQuote.
-// Precios reales: solo Dr. Simi y Farmaexpress (estimados); otras cadenas sin precio.
-//
-// OPTIMIZADO para:
-// - Loguear entrada y salida (para ver tiempos reales).
-// - Usar un único pase sobre stores.json y reutilizar la distancia.
-// - Respetar (si viene) el parámetro radius en metros.
+// Usa scrapers (searchChainPricesLite) para obtener precios reales por cadena.
+// Si no hay precio para una cadena, igual la mostramos con logo + link de búsqueda.
 app.get("/api/prices", async (req, res) => {
   const started = Date.now();
   console.log("[/api/prices] HIT", new Date().toISOString(), req.query);
@@ -276,12 +250,12 @@ app.get("/api/prices", async (req, res) => {
     // Distancia máxima en km (si envías radius en metros, lo usamos; si no, 10km por defecto)
     let maxDistKm = 10;
     if (Number.isFinite(radiusMeters) && radiusMeters > 0) {
-      maxDistKm = Math.min(radiusMeters / 1000, 50); // cap en 50km por seguridad
+      maxDistKm = Math.min(radiusMeters / 1000, 50);
     }
 
+    // 1) Cargar stores.json (para fallback de distancia/sucursal)
     let stores = [];
     let bestByChain = {};
-
     const user =
       Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
 
@@ -293,14 +267,13 @@ app.get("/api/prices", async (req, res) => {
       }
     }
 
-    // Un solo pase por stores.json:
     if (user && Array.isArray(stores) && stores.length) {
       for (const s of stores) {
         if (typeof s.lat !== "number" || typeof s.lng !== "number") continue;
 
         const km = kmBetween(user, { lat: s.lat, lng: s.lng });
         if (!Number.isFinite(km)) continue;
-        if (km > maxDistKm) continue; // fuera del radio permitido
+        if (km > maxDistKm) continue;
 
         const brand = s.brand || "";
         const nb = norm(brand);
@@ -320,6 +293,54 @@ app.get("/api/prices", async (req, res) => {
       }
     }
 
+    // 2) Llamar a scrapers (prices-lite) para obtener precios reales
+    let scrapedByChain = {};
+    try {
+      const lite = await searchChainPricesLite(q, { lat, lng });
+      for (const it of lite.items || []) {
+        const rawChain = (it.chain || "").toString();
+        const nc = norm(rawChain);
+
+        for (const key of chainsOrder) {
+          const meta = CHAIN_META[key];
+          if (!meta) continue;
+          const tk = norm(meta.chainName || key);
+
+          if (!nc.includes(tk) && !tk.includes(nc)) continue;
+
+          const current = scrapedByChain[key];
+          // elegimos el precio más bajo por cadena si hubiera varios
+          const candidatePrice =
+            typeof it.price === "number" ? it.price : Number(it.price) || null;
+
+          if (!current) {
+            scrapedByChain[key] = {
+              name: it.name || rawChain,
+              price: candidatePrice,
+              nearest_km: it.nearest_km ?? null,
+              nearest_maps_url: it.nearest_maps_url ?? null,
+            };
+          } else {
+            if (
+              candidatePrice != null &&
+              (current.price == null || candidatePrice < current.price)
+            ) {
+              scrapedByChain[key] = {
+                name: it.name || rawChain,
+                price: candidatePrice,
+                nearest_km: it.nearest_km ?? current.nearest_km ?? null,
+                nearest_maps_url:
+                  it.nearest_maps_url ?? current.nearest_maps_url ?? null,
+              };
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error en searchChainPricesLite dentro de /api/prices:", e);
+    }
+
+    // 3) Armar respuesta final por cadena
     const items = [];
     for (const key of chainsOrder) {
       const meta = CHAIN_META[key];
@@ -329,6 +350,7 @@ app.get("/api/prices", async (req, res) => {
       let distanceKm = null;
       let mapsUrl = null;
 
+      // info desde stores.json (fallback local por cadena)
       const best = bestByChain[key];
       if (best && best.store) {
         const s = best.store;
@@ -341,13 +363,30 @@ app.get("/api/prices", async (req, res) => {
         );
       }
 
-      const price = estimatedPriceCLP(q, key); // null para cadenas sin precio
+      // info desde scrapers (si existe)
+      const scraped = scrapedByChain[key];
+      let price = null;
+      if (scraped) {
+        if (scraped.price != null && scraped.price > 0) {
+          price = Math.round(scraped.price);
+        }
+        if (scraped.name && !storeName) {
+          storeName = scraped.name;
+        }
+        if (scraped.nearest_km != null && scraped.nearest_km > 0) {
+          distanceKm = Math.round(scraped.nearest_km * 10) / 10;
+        }
+        if (scraped.nearest_maps_url) {
+          mapsUrl = scraped.nearest_maps_url;
+        }
+      }
+
       const buyUrl = meta.searchUrl(q);
 
       items.push({
         chainName: meta.chainName,
-        price,
-        inStock: true,
+        price,                    // null si no hay precio real encontrado
+        inStock: price != null,   // si hay precio, asumimos stock; si no, UI muestra "Ver disponibilidad online"
         storeName,
         distanceKm,
         logoUrl: meta.logoUrl,
@@ -465,7 +504,6 @@ const server = app.listen(PORT, "0.0.0.0", () =>
     { BUILD, COMMIT }
   )
 );
-// sube el timeout a 30s (útil en Render cold start)
 server.setTimeout?.(30000);
 
 function shutdown() {
