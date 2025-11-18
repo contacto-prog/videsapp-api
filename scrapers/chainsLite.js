@@ -1,5 +1,5 @@
 // scrapers/chainsLite.js
-// 👉 Nueva versión: usa scrapers Puppeteer en vez de Google + Jina
+// Versión producción: usa scrapers reales (Puppeteer) por cadena
 
 import puppeteer from "puppeteer";
 
@@ -11,9 +11,6 @@ import {
   fetchFarmaexpress,
   sourceId as farmaexpressId,
 } from "./farmaexpress.js";
-
-// Si alguno de estos archivos todavía no expone `fetchXXX` y `sourceId`,
-// solo tienes que seguir el mismo patrón que en ahumada.js.
 
 const SOURCES = [
   { id: ahumadaId, label: "Ahumada", fetcher: fetchAhumada },
@@ -40,10 +37,8 @@ function withTimeout(promise, ms) {
 
 /**
  * Búsqueda federada: consulta todas las cadenas con scrapers reales.
- * Mantiene la misma firma que la versión anterior para no romper server.js.
- *
  * Devuelve:
- *   { ok, query, count, items: [{ chain, name, price, url }] }
+ *   { ok, query, count, items: [{ chain, name, price, url, mapsUrl?, nearest_km? }] }
  */
 export async function searchChainPricesLite(
   q,
@@ -57,10 +52,16 @@ export async function searchChainPricesLite(
   }
 
   const query = q.trim();
+  if (process.env.DEBUG_PRICES) {
+    console.log("[chainsLite] Buscando precios para:", query);
+  }
 
   try {
     const perSource = await Promise.all(
       SOURCES.map(async (src) => {
+        if (process.env.DEBUG_PRICES) {
+          console.log(`  [chainsLite] Llamando scraper ${src.id}...`);
+        }
         try {
           const rows = await withTimeout(
             src.fetcher(query, {
@@ -71,16 +72,29 @@ export async function searchChainPricesLite(
             9000
           );
 
-          return rows.map((r) => ({
+          if (process.env.DEBUG_PRICES) {
+            console.log(
+              `  [chainsLite] Scraper ${src.id} devolvió ${
+                rows?.length || 0
+              } items`
+            );
+          }
+
+          // Adaptamos el formato de los scrapers:
+          return (rows || []).map((r) => ({
             chain: src.label,            // "Ahumada", "Cruz Verde", etc.
             name: r.name || query,
             price: r.price ?? null,
             url: r.url || null,
-            // mapsUrl / nearest_km no se calculan aquí; server.js usa stores.json
+            mapsUrl: r.mapsUrl || null,
+            nearest_km: r.nearest_km ?? null,
           }));
         } catch (e) {
           if (process.env.DEBUG_PRICES) {
-            console.error(`[chainsLite] Error en scraper ${src.id}:`, e);
+            console.error(
+              `  [chainsLite] Error en scraper ${src.id}:`,
+              e?.message || e
+            );
           }
           return [];
         }
@@ -90,6 +104,9 @@ export async function searchChainPricesLite(
     const flat = perSource.flat();
 
     if (Date.now() - started > HARD_LIMIT_MS) {
+      if (process.env.DEBUG_PRICES) {
+        console.warn("[chainsLite] Límite duro de tiempo excedido");
+      }
       return {
         ok: true,
         query,
@@ -113,12 +130,23 @@ export async function searchChainPricesLite(
       (a, b) => a.price - b.price
     );
 
+    const took = Date.now() - started;
+    if (process.env.DEBUG_PRICES) {
+      console.log(
+        "[chainsLite] Total cadenas con precio:",
+        uniq.length,
+        "en",
+        took,
+        "ms"
+      );
+    }
+
     return {
       ok: true,
       query,
       count: uniq.length,
       items: uniq,
-      took_ms: Date.now() - started,
+      took_ms: took,
     };
   } catch (e) {
     if (process.env.DEBUG_PRICES) {
