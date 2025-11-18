@@ -6,18 +6,16 @@ import {
   normalize,
   parsePriceCLP,
   pickPriceFromHtml,
+  setPageDefaults,
   tryVtexSearch,
+  tryCloseRegionModal,
   pickCards,
 } from "./utils.js";
 
 export const sourceId = "farmaexpress";
 
 /**
- * Scraper Farmaexpress (Chile)
- * Estrategia:
- *  1) Intentar VTEX desde la home (si el sitio lo usa).
- *  2) Probar rutas de búsqueda comunes (VTEX/Magento/Shopify/custom).
- *  3) Extraer por selectores; si falla, fallback por patrón CLP (innerText/HTML).
+ * Scraper Farmaexpress / Farmex
  */
 export async function fetchFarmaexpress(
   q,
@@ -33,189 +31,154 @@ export async function fetchFarmaexpress(
 
   let page;
   try {
+    const started = Date.now();
     page = await browser.newPage();
     await setPageDefaults(page);
 
-    /* ========== 1) VTEX (si aplica) ========== */
-    const homeCandidates = [
-      "https://www.farmaexpress.cl/",
-      "https://farmaexpress.cl/",
-    ];
-    for (const home of homeCandidates) {
-      const ok = await safeGoto(page, home, 25000);
-      if (!ok) continue;
-      await tryDismissCookieBanners(page);
+    const url = `https://farmex.cl/search?q=${encodeURIComponent(q)}`;
 
-      const vtex = await tryVtexSearch(page, q, (p) => p);
-      if (Array.isArray(vtex) && vtex.length) {
-        const seen = new Set();
-        const out = [];
-        for (const it of vtex) {
+    const ok = await safeGoto(page, url, 25000);
+    if (!ok) {
+      if (process.env.DEBUG_PRICES) {
+        console.error("[Farmaexpress] safeGoto falló para URL:", url);
+      }
+      return [];
+    }
+
+    await tryDismissCookieBanners(page);
+    await tryCloseRegionModal(page);
+    await page.waitForTimeout(1200);
+    await autoScroll(page, { steps: 8, delay: 250 });
+    await page.waitForTimeout(800);
+
+    const results = [];
+
+    // 1) VTEX (Farmex también suele estar sobre VTEX)
+    let vtexItems = [];
+    try {
+      vtexItems = await tryVtexSearch(page, q);
+    } catch (e) {
+      if (process.env.DEBUG_PRICES) {
+        console.error("[Farmaexpress] Error en tryVtexSearch:", e);
+      }
+    }
+
+    if (Array.isArray(vtexItems) && vtexItems.length) {
+      for (const item of vtexItems) {
+        const priceNum = parsePriceCLP(
+          item.price ?? item.priceRaw ?? item.priceCLP ?? item
+        );
+        if (!priceNum || priceNum < 100 || priceNum > 500000) continue;
+
+        const name = normalize(item.title || item.name || q);
+        if (!name) continue;
+
+        results.push({
+          store: "Farmaexpress",
+          name,
+          price: priceNum,
+          img: item.img || null,
+          url: item.url || null,
+          stock: true,
+        });
+      }
+    }
+
+    // 2) Fallback DOM
+    if (!results.length) {
+      const cards = await pickCards(page, {
+        cards:
+          ".product-card, .vtex-product-summary-2-x-container, article, .product-item",
+        name: [
+          ".product-card__name",
+          ".vtex-product-summary-2-x-productBrand",
+          ".product-name",
+          "h3 a",
+          "h3",
+        ],
+        price: [
+          ".product-card__price",
+          ".vtex-product-price-1-x-sellingPriceValue",
+          ".price",
+          "[data-price]",
+        ],
+        link: [
+          ".product-card a[href*='/products']",
+          "a.vtex-product-summary-2-x-clearLink",
+          "a[href*='/products']",
+          "a[href*='/producto']",
+          "a",
+        ],
+      });
+
+      for (const c of cards) {
+        const name = normalize(c.name);
+        const priceNum = c.price;
+        if (!name || !Number.isFinite(priceNum)) continue;
+
+        results.push({
+          store: "Farmaexpress",
+          name,
+          price: priceNum,
+          img: null,
+          url: c.link || null,
+          stock: true,
+        });
+      }
+
+      if (!results.length) {
+        const raw = await page.evaluate(() => {
+          const sels = [
+            ".product-card",
+            ".vtex-product-summary-2-x-container",
+            ".product-item",
+            "article",
+          ];
+          const cards = document.querySelectorAll(sels.join(","));
+          const out = [];
+          cards.forEach((card) => {
+            const titleEl =
+              card.querySelector(".product-card__name") ||
+              card.querySelector(".product-name a") ||
+              card.querySelector("h3 a") ||
+              card.querySelector("a[title]") ||
+              card.querySelector("h3");
+
+            const linkEl = card.querySelector("a[href*='/']");
+
+            out.push({
+              title: titleEl?.textContent?.trim() || null,
+              href: linkEl?.href || null,
+              text: (card.innerText || card.textContent || "").trim(),
+              html: card.outerHTML || "",
+            });
+          });
+          return out;
+        });
+
+        for (const it of raw) {
           const name = normalize(it.title);
-          const price = parsePriceCLP(it.price);
+          let price =
+            parsePriceCLP(it.text) ??
+            pickPriceFromHtml(it.html ?? it.text ?? "");
+          if (price && (price < 100 || price > 500000)) price = null;
           if (!name || !price) continue;
-          const key = `${name}|${price}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push({
+
+          results.push({
             store: "Farmaexpress",
             name,
             price,
-            img: null,         // esta vía VTEX no trae imagen directa
-            url: it.url || null,
+            img: null,
+            url: it.href || null,
             stock: true,
           });
-          if (out.length >= 40) break;
         }
-        if (out.length) return out;
       }
-      break; // no damos más vueltas si la home cargó
     }
 
-    /* ========== 2) Rutas de búsqueda visibles (DOM) ========== */
-    const searchUrls = [
-      // VTEX típicos
-      `https://www.farmaexpress.cl/search?q=${encodeURIComponent(q)}`,
-      `https://www.farmaexpress.cl/${encodeURIComponent(q)}?map=ft`,
-      `https://www.farmaexpress.cl/busca?q=${encodeURIComponent(q)}`,
-      // Magento clásico
-      `https://www.farmaexpress.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`,
-      // Variantes sin www
-      `https://farmaexpress.cl/search?q=${encodeURIComponent(q)}`,
-      `https://farmaexpress.cl/${encodeURIComponent(q)}?map=ft`,
-      `https://farmaexpress.cl/busca?q=${encodeURIComponent(q)}`,
-      `https://farmaexpress.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`,
-      // Shopify / custom
-      `https://www.farmaexpress.cl/search?type=product&q=${encodeURIComponent(q)}`,
-      `https://farmaexpress.cl/search?type=product&q=${encodeURIComponent(q)}`,
-    ];
-
-    // Selectores amplios para múltiples plataformas
-    const cardsSelectors = {
-      cards: [
-        // VTEX
-        ".vtex-search-result-3-x-galleryItem",
-        ".vtex-product-summary-2-x-container",
-        // Magento
-        ".product-item",
-        ".product-item-info",
-        "li.product",
-        // Shopify / genéricos
-        ".product-card",
-        ".card-wrapper",
-        ".product-grid .grid__item",
-        ".shelf__item",
-        ".product",
-        ".product-list__item",
-      ].join(","),
-      name: [
-        // VTEX
-        ".vtex-product-summary-2-x-productBrand",
-        ".vtex-product-summary-2-x-productName",
-        // Magento
-        ".product-item-link",
-        ".product-item-name a",
-        "a.product-item-link",
-        // Shopify / genéricos
-        ".product-card__title",
-        ".card__heading",
-        ".product-title",
-        "a[title]",
-      ],
-      price: [
-        // VTEX
-        ".vtex-product-price-1-x-sellingPriceValue",
-        ".vtex-product-price-1-x-currencyInteger",
-        ".best-price",
-        // Magento / genéricos
-        ".price, .product-price, .price__current, .amount, [data-price], [itemprop='price']",
-      ],
-      link: [
-        // VTEX
-        "a.vtex-product-summary-2-x-clearLink",
-        // Magento
-        "a.product-item-link",
-        "a[href*='/p']",
-        // Shopify / genéricos
-        ".card__heading a",
-        "a[href^='/']",
-      ],
-    };
-
-    const all = [];
-    for (const url of searchUrls) {
-      const ok = await safeGoto(page, url, 25000);
-      if (!ok) continue;
-
-      await tryDismissCookieBanners(page);
-      await page.waitForTimeout(1500)
-      await autoScroll(page, { steps: 8, delay: 250 });
-      await page.waitForTimeout(800);
-
-      // 1) Intento con selectores (ya normaliza precio con parsePriceCLP/pickPriceFromHtml)
-      let picked = await pickCards(page, cardsSelectors);
-      let mapped = (picked || []).map((r) => ({
-        store: "Farmaexpress",
-        name: normalize(r.name),
-        price: r.price,
-        img: null,
-        url: r.link || null,
-        stock: true,
-      }));
-
-      // 2) Fallback agresivo si no logramos con selectores
-      if (!mapped.length) {
-        const raw = await page.$$eval(
-          cardsSelectors.cards,
-          (nodes) =>
-            nodes.map((card) => ({
-              text: (card.innerText || card.textContent || "").trim(),
-              html: card.outerHTML || "",
-              name:
-                (card.querySelector(".product-item-link") ||
-                  card.querySelector(".vtex-product-summary-2-x-productBrand") ||
-                  card.querySelector(".vtex-product-summary-2-x-productName") ||
-                  card.querySelector(".product-card__title") ||
-                  card.querySelector(".card__heading") ||
-                  card.querySelector(".product-title") ||
-                  card.querySelector("a[title]"))?.textContent?.trim() || null,
-              href:
-                (card.querySelector("a.vtex-product-summary-2-x-clearLink") ||
-                  card.querySelector("a.product-item-link") ||
-                  card.querySelector(".card__heading a") ||
-                  card.querySelector("a[href*='/p']") ||
-                  card.querySelector("a[href^='/']"))?.href || null,
-              img:
-                (card.querySelector("img") ||
-                  card.querySelector("picture img"))?.src || null,
-            })) || []
-        ).catch(() => []);
-
-        mapped = raw
-          .map((it) => {
-            const name = normalize(it.name);
-            const price =
-              parsePriceCLP(it.text) ?? pickPriceFromHtml(it.html);
-            return {
-              store: "Farmaexpress",
-              name,
-              price: price ?? null,
-              img: it.img || null,
-              url: it.href || null,
-              stock: true,
-            };
-          })
-          .filter((x) => x.name && Number.isFinite(x.price) && x.price > 0);
-      }
-
-      all.push(...mapped);
-      if (all.length >= 40) break;
-    }
-
-    // De-dup por (name|price)
     const seen = new Set();
     const dedup = [];
-    for (const r of all) {
+    for (const r of results) {
       const key = `${r.name}|${r.price}`;
       if (!seen.has(key)) {
         seen.add(key);
@@ -224,14 +187,21 @@ export async function fetchFarmaexpress(
       if (dedup.length >= 40) break;
     }
 
+    if (process.env.DEBUG_PRICES) {
+      console.log(
+        `[Farmaexpress] q="${q}" -> VTEX=${Array.isArray(vtexItems) ? vtexItems.length : 0} items, final=${dedup.length} items, took=${Date.now() - started}ms`
+      );
+    }
+
     return dedup;
   } catch (e) {
     if (process.env.DEBUG_PRICES) {
-      console.error("[Farmaexpress] scraper error:", e?.message || e);
+      console.error("[Farmaexpress] scraper error", e);
     }
     return [];
   } finally {
-    try { await page?.close(); } catch {}
-    await browser.close();
+    try {
+      await browser.close();
+    } catch {}
   }
 }
