@@ -6,14 +6,17 @@ import {
   normalize,
   parsePriceCLP,
   pickPriceFromHtml,
-  tryVtexSearch,
-  pickCards,
   setPageDefaults,
+  tryVtexSearch,
   tryCloseRegionModal,
+  pickCards,
 } from "./utils.js";
 
 export const sourceId = "salcobrand";
 
+/**
+ * Scraper Salcobrand
+ */
 export async function fetchSalcobrand(
   q,
   { puppeteer, headless = "new", executablePath } = {}
@@ -28,155 +31,177 @@ export async function fetchSalcobrand(
 
   let page;
   try {
+    const started = Date.now();
     page = await browser.newPage();
     await setPageDefaults(page);
 
-    // 1) VTEX home
-    const homeOk = await safeGoto(page, "https://www.salcobrand.cl/", 25000);
-    if (homeOk) {
-      await tryDismissCookieBanners(page);
-      await tryCloseRegionModal(page);
-      await page.waitForTimeout(1200);
-      await page
-        .waitForResponse(
-          r => /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(r.url()),
-          { timeout: 6000 }
-        ).catch(() => {});
-      const vtex = await tryVtexSearch(page, q, (p) => p);
-      if (Array.isArray(vtex) && vtex.length) {
-        const seen = new Set(); const out = [];
-        for (const it of vtex) {
+    const url = `https://www.salcobrand.cl/search?text=${encodeURIComponent(q)}`;
+
+    const ok = await safeGoto(page, url, 25000);
+    if (!ok) {
+      if (process.env.DEBUG_PRICES) {
+        console.error("[Salcobrand] safeGoto falló para URL:", url);
+      }
+      return [];
+    }
+
+    await tryDismissCookieBanners(page);
+    await tryCloseRegionModal(page);
+    await page.waitForTimeout(1200);
+    await autoScroll(page, { steps: 8, delay: 250 });
+    await page.waitForTimeout(800);
+
+    const results = [];
+
+    // 1) VTEX
+    let vtexItems = [];
+    try {
+      vtexItems = await tryVtexSearch(page, q);
+    } catch (e) {
+      if (process.env.DEBUG_PRICES) {
+        console.error("[Salcobrand] Error en tryVtexSearch:", e);
+      }
+    }
+
+    if (Array.isArray(vtexItems) && vtexItems.length) {
+      for (const item of vtexItems) {
+        const priceNum = parsePriceCLP(
+          item.price ?? item.priceRaw ?? item.priceCLP ?? item
+        );
+        if (!priceNum || priceNum < 100 || priceNum > 500000) continue;
+
+        const name = normalize(item.title || item.name || q);
+        if (!name) continue;
+
+        results.push({
+          store: "Salcobrand",
+          name,
+          price: priceNum,
+          img: item.img || null,
+          url: item.url || null,
+          stock: true,
+        });
+      }
+    }
+
+    // 2) Fallback DOM
+    if (!results.length) {
+      const cards = await pickCards(page, {
+        cards:
+          ".product-card, .vtex-product-summary-2-x-container, article, .product-item",
+        name: [
+          ".product-card__name",
+          ".vtex-product-summary-2-x-productBrand",
+          ".product-name",
+          "h3 a",
+          "h3",
+        ],
+        price: [
+          ".product-card__price",
+          ".vtex-product-price-1-x-sellingPriceValue",
+          ".price",
+          "[data-price]",
+        ],
+        link: [
+          ".product-card a[href*='/products']",
+          "a.vtex-product-summary-2-x-clearLink",
+          "a[href*='/products']",
+          "a[href*='/producto']",
+          "a",
+        ],
+      });
+
+      for (const c of cards) {
+        const name = normalize(c.name);
+        const priceNum = c.price;
+        if (!name || !Number.isFinite(priceNum)) continue;
+
+        results.push({
+          store: "Salcobrand",
+          name,
+          price: priceNum,
+          img: null,
+          url: c.link || null,
+          stock: true,
+        });
+      }
+
+      if (!results.length) {
+        const raw = await page.evaluate(() => {
+          const sels = [
+            ".product-card",
+            ".vtex-product-summary-2-x-container",
+            ".product-item",
+            "article",
+          ];
+          const cards = document.querySelectorAll(sels.join(","));
+          const out = [];
+          cards.forEach((card) => {
+            const titleEl =
+              card.querySelector(".product-card__name") ||
+              card.querySelector(".product-name a") ||
+              card.querySelector("h3 a") ||
+              card.querySelector("a[title]") ||
+              card.querySelector("h3");
+
+            const linkEl = card.querySelector("a[href*='/']");
+
+            out.push({
+              title: titleEl?.textContent?.trim() || null,
+              href: linkEl?.href || null,
+              text: (card.innerText || card.textContent || "").trim(),
+              html: card.outerHTML || "",
+            });
+          });
+          return out;
+        });
+
+        for (const it of raw) {
           const name = normalize(it.title);
-          const price = parsePriceCLP(it.price);
+          let price =
+            parsePriceCLP(it.text) ??
+            pickPriceFromHtml(it.html ?? it.text ?? "");
+          if (price && (price < 100 || price > 500000)) price = null;
           if (!name || !price) continue;
-          const key = `${name}|${price}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push({ store:"Salcobrand", name, price, img:null, url:it.url||null, stock:true });
-          if (out.length >= 40) break;
+
+          results.push({
+            store: "Salcobrand",
+            name,
+            price,
+            img: null,
+            url: it.href || null,
+            stock: true,
+          });
         }
-        if (out.length) return out;
       }
     }
 
-    // 2) DOM visible
-    const searchUrls = [
-      `https://www.salcobrand.cl/search?q=${encodeURIComponent(q)}`,
-      `https://www.salcobrand.cl/${encodeURIComponent(q)}?map=ft`,
-      `https://www.salcobrand.cl/busca?q=${encodeURIComponent(q)}`,
-      `https://www.salcobrand.cl/catalogsearch/result/?q=${encodeURIComponent(q)}`,
-    ];
-
-    const cardsSelectors = {
-      cards: [
-        ".vtex-search-result-3-x-galleryItem",
-        ".vtex-product-summary-2-x-container",
-        ".product-item",
-        ".product-item-info",
-        "li.product",
-        ".product-card",
-        ".shelf__item",
-      ].join(","),
-      name: [
-        ".vtex-product-summary-2-x-productBrand",
-        ".vtex-product-summary-2-x-productName",
-        ".product-item-link",
-        ".product-item-name a",
-        ".product-card__title",
-        ".card__heading",
-        ".product-title",
-        "a[title]",
-      ],
-      price: [
-        ".vtex-product-price-1-x-sellingPriceValue",
-        ".vtex-product-price-1-x-currencyInteger",
-        ".best-price",
-        ".price, .product-price, .price__current, .amount, [data-price], [itemprop='price']",
-      ],
-      link: [
-        "a.vtex-product-summary-2-x-clearLink",
-        "a.product-item-link",
-        "a[href*='/p']",
-        ".card__heading a",
-        "a[href^='/']",
-      ],
-    };
-
-    const all = [];
-    for (const url of searchUrls) {
-      const ok = await safeGoto(page, url, 25000);
-      if (!ok) continue;
-
-      await tryDismissCookieBanners(page);
-      await tryCloseRegionModal(page);
-      await page.waitForTimeout(1500);
-      await autoScroll(page, { steps: 8, delay: 250 });
-      await page.waitForTimeout(800);
-      await page
-        .waitForResponse(
-          r => /intelligent-search\/product_search\/v1|catalog_system\/pub\/products\/search/i.test(r.url()),
-          { timeout: 6000 }
-        ).catch(() => {});
-
-      let picked = await pickCards(page, cardsSelectors);
-      let mapped = (picked || []).map((r) => ({
-        store: "Salcobrand",
-        name: normalize(r.name),
-        price: r.price,
-        img: null,
-        url: r.link || null,
-        stock: true,
-      }));
-
-      if (!mapped.length) {
-        const raw = await page.$$eval(cardsSelectors.cards, (nodes) =>
-          nodes.map((card) => ({
-            text: (card.innerText || card.textContent || "").trim(),
-            html: card.outerHTML || "",
-            name:
-              (card.querySelector(".vtex-product-summary-2-x-productBrand") ||
-               card.querySelector(".vtex-product-summary-2-x-productName") ||
-               card.querySelector(".product-item-link") ||
-               card.querySelector(".product-item-name a") ||
-               card.querySelector(".product-card__title") ||
-               card.querySelector(".card__heading") ||
-               card.querySelector(".product-title") ||
-               card.querySelector("a[title]"))?.textContent?.trim() || null,
-            href:
-              (card.querySelector("a.vtex-product-summary-2-x-clearLink") ||
-               card.querySelector("a.product-item-link") ||
-               card.querySelector(".card__heading a") ||
-               card.querySelector("a[href*='/p']") ||
-               card.querySelector("a[href^='/']"))?.href || null,
-            img:
-              (card.querySelector("img") ||
-               card.querySelector("picture img"))?.src || null,
-          }))
-        ).catch(() => []);
-
-        mapped = raw.map((it) => {
-          const name = normalize(it.name);
-          const price = parsePriceCLP(it.text) ?? pickPriceFromHtml(it.html);
-          return { store:"Salcobrand", name, price: price ?? null, img: it.img || null, url: it.href || null, stock:true };
-        }).filter((x) => x.name && Number.isFinite(x.price) && x.price > 0);
-      }
-
-      all.push(...mapped);
-      if (all.length >= 40) break;
-    }
-
-    const seen = new Set(); const dedup = [];
-    for (const r of all) {
+    const seen = new Set();
+    const dedup = [];
+    for (const r of results) {
       const key = `${r.name}|${r.price}`;
-      if (!seen.has(key)) { seen.add(key); dedup.push(r); }
+      if (!seen.has(key)) {
+        seen.add(key);
+        dedup.push(r);
+      }
       if (dedup.length >= 40) break;
     }
+
+    if (process.env.DEBUG_PRICES) {
+      console.log(
+        `[Salcobrand] q="${q}" -> VTEX=${Array.isArray(vtexItems) ? vtexItems.length : 0} items, final=${dedup.length} items, took=${Date.now() - started}ms`
+      );
+    }
+
     return dedup;
   } catch (e) {
-    if (process.env.DEBUG_PRICES) console.error("[Salcobrand] scraper error:", e?.message || e);
+    if (process.env.DEBUG_PRICES) {
+      console.error("[Salcobrand] scraper error", e);
+    }
     return [];
   } finally {
-    try { await page?.close(); } catch {}
-    await browser.close();
+    try {
+      await browser.close();
+    } catch {}
   }
 }
