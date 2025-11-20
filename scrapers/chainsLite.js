@@ -1,5 +1,5 @@
 // scrapers/chainsLite.js
-// Versión "real" usando Puppeteer para scrapear precio por cadena
+// Versión REAL: usa Puppeteer para obtener el primer precio visible por cadena
 
 import puppeteer from "puppeteer";
 import {
@@ -63,7 +63,7 @@ async function scrapeChain(browser, cfg, q, { lat, lng }) {
     await setPageDefaults(page);
 
     const url = cfg.searchUrl(q);
-    const ok = await safeGoto(page, url, 20000);
+    const ok = await safeGoto(page, url, 25000);
     if (!ok) {
       return null;
     }
@@ -97,13 +97,16 @@ async function scrapeChain(browser, cfg, q, { lat, lng }) {
 }
 
 /**
- * Busca precio por cadena usando Puppeteer.
- * Devuelve el mejor precio encontrado por cadena.
+ * Busca precios por cadena usando Puppeteer.
+ * Devuelve 0–1 resultado por cadena con su mejor precio encontrado.
  *
  * @param {string} q
  * @param {{lat?: number|null, lng?: number|null}} opts
  */
-export async function searchChainPricesLite(q, { lat = null, lng = null } = {}) {
+export async function searchChainPricesLite(
+  q,
+  { lat = null, lng = null } = {}
+) {
   const started = Date.now();
   const query = String(q || "").trim();
   if (!query) {
@@ -126,7 +129,7 @@ export async function searchChainPricesLite(q, { lat = null, lng = null } = {}) 
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
 
-    // Por ahora lo hacemos secuencial para no matar la RAM en Render
+    // Secuencial para no reventar memoria en Render
     for (const cfg of CHAINS) {
       const r = await scrapeChain(browser, cfg, query, { lat, lng });
       if (r) items.push(r);
@@ -156,4 +159,3 @@ export async function searchChainPricesLite(q, { lat = null, lng = null } = {}) 
     took_ms: Date.now() - started,
   };
 }
-
