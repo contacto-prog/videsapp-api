@@ -1,79 +1,158 @@
-import { parsePriceCLP } from "./utils.js";
+// scrapers/chainsLite.js
+// Versión "real" usando Puppeteer para scrapear precio por cadena
 
-const HOST_TO_CHAIN = {
-  "cruzverde.cl": "Cruz Verde",
-  "www.cruzverde.cl": "Cruz Verde",
-  "farmaciasahumada.cl": "Ahumada",
-  "www.farmaciasahumada.cl": "Ahumada",
-  "salcobrand.cl": "Salcobrand",
-  "www.salcobrand.cl": "Salcobrand",
-  "farmex.cl": "Farmaexpress",
-  "www.farmex.cl": "Farmaexpress",
-  "drsimi.cl": "Dr. Simi",
-  "www.drsimi.cl": "Dr. Simi"
-};
+import puppeteer from "puppeteer";
+import {
+  robustFirstPrice,
+  setPageDefaults,
+  safeGoto,
+  tryDismissCookieBanners,
+  autoScroll,
+} from "./utils.js";
 
-function mkMapsUrl(chain) {
-  return `https://www.google.com/maps/dir/?api=1&destination=Farmacia ${encodeURIComponent(chain)}`;
+const CHAINS = [
+  {
+    id: "ahumada",
+    chainName: "Ahumada",
+    searchUrl: (q) =>
+      `https://www.farmaciasahumada.cl/search?q=${encodeURIComponent(q)}`,
+  },
+  {
+    id: "cruzverde",
+    chainName: "Cruz Verde",
+    searchUrl: (q) =>
+      `https://www.cruzverde.cl/search?q=${encodeURIComponent(q)}`,
+  },
+  {
+    id: "salcobrand",
+    chainName: "Salcobrand",
+    searchUrl: (q) =>
+      `https://www.salcobrand.cl/search?text=${encodeURIComponent(q)}`,
+  },
+  {
+    id: "drsimi",
+    chainName: "Dr. Simi",
+    searchUrl: (q) =>
+      `https://www.drsimi.cl/search?q=${encodeURIComponent(q)}`,
+  },
+  {
+    id: "farmaexpress",
+    chainName: "Farmaexpress",
+    searchUrl: (q) =>
+      `https://farmex.cl/search?q=${encodeURIComponent(q)}`,
+  },
+];
+
+function mkMapsUrl(chain, lat = null, lng = null) {
+  const base = "https://www.google.com/maps/dir/?api=1";
+  const dest = encodeURIComponent("Farmacia " + chain);
+  if (
+    typeof lat === "number" &&
+    typeof lng === "number" &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng)
+  ) {
+    return `${base}&destination=${dest}&origin=${lat},${lng}&travelmode=driving`;
+  }
+  return `${base}&destination=${dest}&travelmode=driving`;
 }
 
-export async function searchChainPricesLite(q) {
-  const query =
-    `${q} precio (site:cruzverde.cl OR site:farmaciasahumada.cl OR site:salcobrand.cl OR site:farmex.cl OR site:drsimi.cl)`;
-
-  const url =
-    `https://r.jina.ai/http://www.google.com/search?q=${encodeURIComponent(query)}&hl=es-CL&num=30`;
-
-  let text = "";
+async function scrapeChain(browser, cfg, q, { lat, lng }) {
+  const page = await browser.newPage();
   try {
-    const res = await fetch(url);
-    text = await res.text();
-  } catch {
-    return { ok: true, query: q, count: 0, items: [] };
-  }
+    await setPageDefaults(page);
 
-  const lines = text.split("\n").map(s => s.trim()).filter(Boolean);
+    const url = cfg.searchUrl(q);
+    const ok = await safeGoto(page, url, 20000);
+    if (!ok) {
+      return null;
+    }
 
-  const items = [];
-  for (const line of lines) {
-    const price = parsePriceCLP(line);
-    if (!price) continue;
+    await tryDismissCookieBanners(page);
+    await page.waitForTimeout(1500);
+    await autoScroll(page, { steps: 6, delay: 250 });
+    await page.waitForTimeout(800);
 
-    const match = line.match(/https?:\/\/[^\s]+/);
-    if (!match) continue;
+    const price = await robustFirstPrice(page);
+    if (!price || !Number.isFinite(price) || price <= 0) {
+      return null;
+    }
 
-    let host = "";
-    try {
-      host = new URL(match[0]).host;
-    } catch {}
-
-    const chain = HOST_TO_CHAIN[host];
-    if (!chain) continue;
-
-    items.push({
-      chain,
+    return {
+      chain: cfg.chainName,
       price,
-      url: match[0],
-      mapsUrl: mkMapsUrl(chain)
-    });
+      url,
+      mapsUrl: mkMapsUrl(cfg.chainName, lat, lng),
+    };
+  } catch (e) {
+    if (process.env.DEBUG_PRICES) {
+      console.error("[chainsLite] error en cadena", cfg.chainName, e);
+    }
+    return null;
+  } finally {
+    try {
+      await page.close();
+    } catch {}
+  }
+}
+
+/**
+ * Busca precio por cadena usando Puppeteer.
+ * Devuelve el mejor precio encontrado por cadena.
+ *
+ * @param {string} q
+ * @param {{lat?: number|null, lng?: number|null}} opts
+ */
+export async function searchChainPricesLite(q, { lat = null, lng = null } = {}) {
+  const started = Date.now();
+  const query = String(q || "").trim();
+  if (!query) {
+    return {
+      ok: false,
+      query: "",
+      count: 0,
+      items: [],
+      error: "q_required",
+    };
   }
 
-  // dedupe por cadena, deja solo el más barato
-  const map = new Map();
-  for (const item of items) {
-    const prev = map.get(item.chain);
-    if (!prev || item.price < prev.price) {
-      map.set(item.chain, item);
+  let browser = null;
+  const items = [];
+
+  try {
+    browser = await puppeteer.launch({
+      headless: "new",
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    // Por ahora lo hacemos secuencial para no matar la RAM en Render
+    for (const cfg of CHAINS) {
+      const r = await scrapeChain(browser, cfg, query, { lat, lng });
+      if (r) items.push(r);
+    }
+  } catch (e) {
+    console.error("[chainsLite] error general", e);
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
     }
   }
 
-  const out = Array.from(map.values());
-  out.sort((a, b) => a.price - b.price);
+  items.sort((a, b) => {
+    if (a.price && b.price) return a.price - b.price;
+    if (a.price) return -1;
+    if (b.price) return 1;
+    return 0;
+  });
 
   return {
     ok: true,
-    query: q,
-    count: out.length,
-    items: out
+    query,
+    count: items.length,
+    items,
+    took_ms: Date.now() - started,
   };
 }
