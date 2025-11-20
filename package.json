@@ -8,8 +8,10 @@
   },
   "scripts": {
     "start": "node server.js",
+    "postinstall": "PUPPETEER_CACHE_DIR=.puppeteer npx puppeteer install chrome",
     "render-build": "npm ci || npm install",
     "render-start": "node server.js"
+
   },
   "dependencies": {
     "compression": "^1.7.4",
