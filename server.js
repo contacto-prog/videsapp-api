@@ -1,22 +1,31 @@
-// server.js – VIDESAPP API (prices-lite + federado + nearby + prices API MVP)
+// server.js – VIDESAPP API (precios + asistente MiPharmAPP)
+
 import express from "express";
 import cors from "cors";
 import compression from "compression";
 import morgan from "morgan";
 import fs from "fs/promises";
+import OpenAI from "openai";
 import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
-const BUILD  = "prices-lite-2025-11-14-scrapers-v3";
+// ------------ Config básica ------------
+const BUILD = "prices-lite-2025-11-14-scrapers-v3";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
-const PORT   = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080;
+
+// Cliente OpenAI (asegúrate de tener OPENAI_API_KEY en Render)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
 app.use(compression());
 app.use(morgan("tiny"));
+app.use(express.json()); // necesario para leer JSON del body
 
-// Timeout defensivo (respuesta 504 si algo se cuelga)
+// Timeout defensivo
 app.use((req, res, next) => {
   res.setTimeout(30000, () => {
     try {
@@ -30,13 +39,14 @@ app.use((req, res, next) => {
 // -------------------- Helpers --------------------
 function kmBetween(a, b) {
   const R = 6371;
-  const dLat = (b.lat - a.lat) * Math.PI / 180;
-  const dLng = (b.lng - a.lng) * Math.PI / 180;
-  const sLat1 = Math.sin(dLat / 2), sLng1 = Math.sin(dLng / 2);
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const sLat1 = Math.sin(dLat / 2),
+    sLng1 = Math.sin(dLng / 2);
   const A =
     sLat1 * sLat1 +
-    Math.cos(a.lat * Math.PI / 180) *
-      Math.cos(b.lat * Math.PI / 180) *
+    Math.cos((a.lat * Math.PI) / 180) *
+      Math.cos((b.lat * Math.PI) / 180) *
       sLng1 * sLng1;
   return 2 * R * Math.asin(Math.sqrt(A));
 }
@@ -141,7 +151,7 @@ app.get("/prices-lite-ping", (_req, res) => {
   res.json({ ok: true, ping: "prices-lite", build: BUILD });
 });
 
-// -------------------- precios-lite (JSON nativo de chainsLite) --------------------
+// -------------------- precios-lite (JSON de chainsLite) --------------------
 app.get("/prices-lite", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -155,7 +165,7 @@ app.get("/prices-lite", async (req, res) => {
   }
 });
 
-// Compat: /search2 -> precios-lite (mismo formato reducido)
+// Compat: /search2 -> precios-lite
 app.get("/search2", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
@@ -234,9 +244,7 @@ app.get("/api/prices", async (req, res) => {
     const q = String(req.query.q || req.query.product || "").trim();
     const lat = req.query.lat ? Number(req.query.lat) : null;
     const lng = req.query.lng ? Number(req.query.lng) : null;
-    const radiusMeters = req.query.radius
-      ? Number(req.query.radius)
-      : null;
+    const radiusMeters = req.query.radius ? Number(req.query.radius) : null;
 
     if (!q) {
       return res.status(400).json({ ok: false, error: "q_required" });
@@ -314,8 +322,7 @@ app.get("/api/prices", async (req, res) => {
 
           const current = scrapedByChain[key];
           const candidatePrice = normalizePrice(it.price);
-          const mapsFromItem =
-            it.nearest_maps_url || it.mapsUrl || null;
+          const mapsFromItem = it.nearest_maps_url || it.mapsUrl || null;
           const urlFromItem = it.url || null;
 
           if (!current) {
@@ -347,7 +354,10 @@ app.get("/api/prices", async (req, res) => {
       }
       console.log("[/api/prices] SCRAPED", scrapedByChain);
     } catch (e) {
-      console.error("Error en searchChainPricesLite dentro de /api/prices:", e);
+      console.error(
+        "Error en searchChainPricesLite dentro de /api/prices:",
+        e
+      );
     }
 
     // 3) Armar respuesta final por cadena
@@ -360,7 +370,7 @@ app.get("/api/prices", async (req, res) => {
       let distanceKm = null;
       let mapsUrl = null;
 
-      // info desde stores.json (fallback local por cadena)
+      // info desde stores.json
       const best = bestByChain[key];
       if (best && best.store) {
         const s = best.store;
@@ -398,8 +408,8 @@ app.get("/api/prices", async (req, res) => {
 
       items.push({
         chainName: meta.chainName,
-        price,                    // null si no hay precio real encontrado
-        inStock: price != null,   // si hay precio, asumimos stock; si no, la app muestra "Ver disponibilidad online"
+        price, // null si no hay precio real
+        inStock: price != null, // si hay precio, asumimos stock
         storeName,
         distanceKm,
         logoUrl: meta.logoUrl,
@@ -411,11 +421,7 @@ app.get("/api/prices", async (req, res) => {
     }
 
     const elapsed = Date.now() - started;
-    console.log(
-      "[/api/prices] DONE",
-      elapsed + "ms",
-      "items=" + items.length
-    );
+    console.log("[/api/prices] DONE", elapsed + "ms", "items=" + items.length);
 
     res.json({
       ok: true,
@@ -503,6 +509,58 @@ app.get("/nearby", async (req, res) => {
   }
 });
 
+// -------------------- /api/chat (asistente MiPharmAPP) --------------------
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { message, pricesContext } = req.body || {};
+
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({ ok: false, error: "message_required" });
+    }
+
+    let pricesText = "";
+    if (pricesContext && Array.isArray(pricesContext.items)) {
+      const lines = pricesContext.items.map((it) => {
+        const priceStr =
+          it.price != null ? `$${it.price}` : "precio no disponible";
+        return `- ${it.chainName}: ${priceStr} (url: ${it.buyUrl})`;
+      });
+      pricesText = lines.join("\n");
+    }
+
+    const systemPrompt = `
+Eres el asistente de MiPharmAPP.
+
+- Ayudas a los usuarios a entender los resultados de farmacias y medicamentos.
+- NO inventes precios. Si no hay precio en los datos, di que deben revisarlo en la web de la farmacia.
+- No des indicaciones médicas personalizadas; siempre recomienda consultar a un profesional de la salud.
+- Si el usuario pregunta qué farmacia le conviene, usa SOLO la lista que te pasamos como contexto.
+`.trim();
+
+    const userPrompt = pricesText
+      ? `Mensaje del usuario: "${message}".\n\nResultados de farmacias:\n${pricesText}\n\nResponde de forma clara en español.`
+      : `Mensaje del usuario: "${message}". No hay datos de precios en este momento. Responde solo con información general en español.`;
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
+
+    const answer = completion.choices?.[0]?.message?.content || "";
+
+    res.json({
+      ok: true,
+      answer,
+    });
+  } catch (e) {
+    console.error("Error en /api/chat", e);
+    res.status(500).json({ ok: false, error: "openai_error" });
+  }
+});
+
 // -------------------- 404 --------------------
 app.use((req, res) =>
   res.status(404).json({ ok: false, error: "not_found", path: req.path })
@@ -510,10 +568,10 @@ app.use((req, res) =>
 
 // -------------------- start & shutdown --------------------
 const server = app.listen(PORT, "0.0.0.0", () =>
-  console.log(
-    `✅ Server listening on http://0.0.0.0:${PORT}`,
-    { BUILD, COMMIT }
-  )
+  console.log(`✅ Server listening on http://0.0.0.0:${PORT}`, {
+    BUILD,
+    COMMIT,
+  })
 );
 server.setTimeout?.(30000);
 
