@@ -518,73 +518,54 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ ok: false, error: "message_required" });
     }
 
+    // Armamos contexto de precios para la IA
     let pricesText = "";
-    let allWithoutPrice = false;
-
-    if (
-      pricesContext &&
-      Array.isArray(pricesContext.items) &&
-      pricesContext.items.length > 0
-    ) {
-      const items = pricesContext.items;
-
-      // ¿Todos sin precio?
-      allWithoutPrice = items.every((it) => it.price == null);
-
-      const lines = items.map((it) => {
-        const chain = it.chainName || "Farmacia";
+    if (pricesContext && Array.isArray(pricesContext.items)) {
+      const lines = pricesContext.items.map((it) => {
         const priceStr =
           it.price != null ? `$${it.price}` : "precio no disponible";
         const distStr =
-          it.distanceKm != null ? `aprox. a ${it.distanceKm} km` : "";
-        const webStr = it.buyUrl ? `web: ${it.buyUrl}` : "";
-        const mapsStr = it.mapsUrl ? `cómo llegar: ${it.mapsUrl}` : "";
-
-        return [
-          `- ${chain}`,
-          priceStr,
-          distStr,
-          webStr,
-          mapsStr,
-        ]
-          .filter(Boolean)
-          .join(" | ");
+          it.distanceKm != null ? `${it.distanceKm} km aprox.` : "sin distancia";
+        return `- ${it.chainName}: ${priceStr}, distancia ${distStr}`;
       });
-
       pricesText = lines.join("\n");
     }
 
     const systemPrompt = `
-Eres el asistente de MiPharmAPP, una app de comparación de farmacias en Chile.
+Eres el asistente de MiPharmAPP.
 
-- Ayudas a los usuarios a entender los resultados de farmacias y medicamentos.
-- NO inventes precios ni descuentos. Si no hay precio en los datos, di explícitamente que el precio no está disponible.
-- Puedes usar los nombres de farmacias, distancias, enlaces web (buyUrl) y enlaces de "cómo llegar" (mapsUrl) que se te pasan como contexto.
-- Nunca inventes farmacias nuevas ni URLs nuevas: usa solo las que aparecen en el contexto.
-- No des indicaciones médicas personalizadas ni ajustes de dosis; siempre recomienda consultar a un profesional de la salud.
-- Si el usuario pregunta qué farmacia le conviene, explica comparando SOLO las opciones del contexto.
-- Si no hay precios pero sí farmacias con webs, explica que no se encontró el precio y ofrece algo del estilo:
-  "No pude obtener el precio de este medicamento, pero estas farmacias están cerca de ti; aquí están sus páginas web para que revises el valor actualizado".
+Tu objetivo es ayudar al usuario a entender qué farmacia le puede convenir según:
+- precios más bajos cuando existan
+- distancia aproximada cuando no haya precios
+
+REGLAS IMPORTANTES:
+- NO inventes precios.
+- Si no hay precio en los datos, di claramente que no tienes el valor y sugiere revisar las farmacias usando los botones de la app.
+- No des indicaciones médicas personalizadas; siempre recomienda consultar a un profesional de la salud.
+- Responde SIEMPRE en español chileno, en un tono cercano y sencillo.
+- Responde en máximo 3 frases.
+- NO uses listas con guiones ni numeración.
+- NO incluyas URLs ni copias textuales largas de las farmacias.
+- Menciona solo las 1–2 alternativas que parezcan más convenientes (por precio si existe, si no por distancia o disponibilidad).
 `.trim();
 
-    let userPrompt;
+    const userPrompt = pricesText
+      ? `
+Mensaje del usuario: "${message}"
 
-    if (pricesText) {
-      userPrompt = `
-Mensaje del usuario: "${message}".
-
-Contexto de resultados de farmacias (cada línea incluye nombre de cadena, precio si existe, distancia, web y cómo llegar):
+Resultados de farmacias cercanas (solo para que los uses como contexto):
 ${pricesText}
 
-Responde de forma clara en español. Si ves que la mayoría no tiene precio, prioriza explicar que no se encontró el precio y sugiere revisar las webs indicadas.
-`.trim();
-    } else {
-      userPrompt = `
-Mensaje del usuario: "${message}".
+Con esta información, responde en un párrafo corto explicando qué farmacia(s) le podrían convenir más al usuario para este medicamento, SIN poner precios inventados, SIN URLs y sin listas. 
+Si no tienes ningún precio disponible, acláralo y sugiérele revisar los botones de la app para ver detalle en cada cadena.
+`.trim()
+      : `
+Mensaje del usuario: "${message}"
 
-No hay datos de precios ni de farmacias en este momento. Responde solo con información general en español y sugiere al usuario consultar directamente en farmacias o con un profesional de la salud.
+No hay datos de precios en este momento. 
+Responde solo con información general, explicando que no pudiste obtener los valores de las farmacias y que puede revisar los sitios o botones de la app para comparar. 
+No incluyas URLs ni listas.
 `.trim();
-    }
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
@@ -592,28 +573,28 @@ No hay datos de precios ni de farmacias en este momento. Responde solo con infor
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.3,
+      temperature: 0.4,
+      max_tokens: 220,
     });
 
     const answer = completion.choices?.[0]?.message?.content?.trim() || "";
 
-    return res.json({
+    if (!answer) {
+      console.error("OpenAI devolvió respuesta vacía");
+      return res.json({
+        ok: true,
+        answer:
+          "No pude obtener la recomendación del asistente en este momento. Por favor revisa los precios y la distancia de cada farmacia en la lista.",
+      });
+    }
+
+    res.json({
       ok: true,
       answer,
     });
   } catch (e) {
-    console.error("Error en /api/chat", e?.response?.data || e);
-
-    const fallback =
-      "En este momento no pude obtener una recomendación automática, " +
-      "pero puedes revisar las farmacias listadas, sus páginas web y los enlaces " +
-      'de "cómo llegar" para comparar precios actualizados y elegir la que más te acomode.';
-
-    return res.status(200).json({
-      ok: true,
-      answer: fallback,
-      degraded: true,
-    });
+    console.error("Error en /api/chat", e);
+    res.status(500).json({ ok: false, error: "openai_error" });
   }
 });
 
