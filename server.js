@@ -1,4 +1,4 @@
-// server.js // server.js – VIDESAPP API (precios + asistente MiPharmAPP)
+// server.js – VIDESAPP API (precios + asistente MiPharmAPP)
 
 import express from "express";
 import cors from "cors";
@@ -597,13 +597,23 @@ No hay datos de precios ni de farmacias en este momento. Responde solo con infor
 
     const answer = completion.choices?.[0]?.message?.content?.trim() || "";
 
-    res.json({
+    return res.json({
       ok: true,
       answer,
     });
   } catch (e) {
-    console.error("Error en /api/chat", e);
-    res.status(500).json({ ok: false, error: "openai_error" });
+    console.error("Error en /api/chat", e?.response?.data || e);
+
+    const fallback =
+      "En este momento no pude obtener una recomendación automática, " +
+      "pero puedes revisar las farmacias listadas, sus páginas web y los enlaces " +
+      'de "cómo llegar" para comparar precios actualizados y elegir la que más te acomode.';
+
+    return res.status(200).json({
+      ok: true,
+      answer: fallback,
+      degraded: true,
+    });
   }
 });
 
