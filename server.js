@@ -9,7 +9,7 @@ import OpenAI from "openai";
 import { searchChainPricesLite } from "./scrapers/chainsLite.js";
 
 // ------------ Config básica ------------
-const BUILD = "prices-lite-2025-11-14-scrapers-v3";
+const BUILD = "prices-lite-2025-11-26-assistant-v2";
 const COMMIT = process.env.RENDER_GIT_COMMIT || null;
 const PORT = process.env.PORT || 8080;
 
@@ -512,21 +512,25 @@ app.get("/nearby", async (req, res) => {
 // -------------------- /api/chat (asistente MiPharmAPP) --------------------
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, pricesContext } = req.body || {};
+    const { message, pricesContext, productLabel } = req.body || {};
 
     if (!message || typeof message !== "string") {
       return res.status(400).json({ ok: false, error: "message_required" });
     }
 
-    // Armamos contexto de precios para la IA
+    // Serializamos el contexto de precios en texto legible
     let pricesText = "";
     if (pricesContext && Array.isArray(pricesContext.items)) {
       const lines = pricesContext.items.map((it) => {
-        const priceStr =
-          it.price != null ? `$${it.price}` : "precio no disponible";
-        const distStr =
-          it.distanceKm != null ? `${it.distanceKm} km aprox.` : "sin distancia";
-        return `- ${it.chainName}: ${priceStr}, distancia ${distStr}`;
+        const chainName = it.chainName || "Farmacia";
+        const price =
+          typeof it.price === "number" ? `$${it.price}` : "sin_precio";
+        const dist =
+          typeof it.distanceKm === "number"
+            ? `${it.distanceKm.toFixed(1)} km`
+            : "distancia_desconocida";
+        const buyUrl = it.buyUrl || "sin_url";
+        return `- ${chainName}: precio=${price}, distancia=${dist}, url=${buyUrl}`;
       });
       pricesText = lines.join("\n");
     }
@@ -534,37 +538,27 @@ app.post("/api/chat", async (req, res) => {
     const systemPrompt = `
 Eres el asistente de MiPharmAPP.
 
-Tu objetivo es ayudar al usuario a entender qué farmacia le puede convenir según:
-- precios más bajos cuando existan
-- distancia aproximada cuando no haya precios
+Tu objetivo es ayudar al usuario a decidir en qué farmacia le conviene comprar, usando SOLO la información que te entregamos.
 
 REGLAS IMPORTANTES:
-- NO inventes precios.
-- Si no hay precio en los datos, di claramente que no tienes el valor y sugiere revisar las farmacias usando los botones de la app.
-- No des indicaciones médicas personalizadas; siempre recomienda consultar a un profesional de la salud.
-- Responde SIEMPRE en español chileno, en un tono cercano y sencillo.
-- Responde en máximo 3 frases.
-- NO uses listas con guiones ni numeración.
-- NO incluyas URLs ni copias textuales largas de las farmacias.
-- Menciona solo las 1–2 alternativas que parezcan más convenientes (por precio si existe, si no por distancia o disponibilidad).
+- NO inventes precios ni promociones. Si un precio viene como "sin_precio" o null, di explícitamente que el precio no está disponible.
+- SI hay precios: compáralos y explica brevemente cuál parece más conveniente (por ejemplo la más barata, o la más barata dentro de cierta distancia).
+- SI NO hay precios: 
+  - Usa distancia ("km") y la presencia de links (url) para sugerir qué farmacia es más práctica (por ejemplo la más cercana o la que tiene sitio web directo).
+  - Puedes decir que el usuario revise los botones de la app ("Ver en la web", "Ir") para detalles actualizados.
+- No entregues indicaciones médicas personalizadas (dosificación, cambios de tratamiento, etc.). Siempre recomienda consultar a un profesional de la salud para eso.
+- Responde SIEMPRE en español, en 3–6 frases máximo, fácil de leer dentro de una tarjeta de la app.
+- No repitas literalmente todo el contexto, solo da un resumen útil.
 `.trim();
 
-    const userPrompt = pricesText
-      ? `
+    const userPrompt = `
 Mensaje del usuario: "${message}"
+Producto consultado: "${productLabel || ""}"
 
-Resultados de farmacias cercanas (solo para que los uses como contexto):
-${pricesText}
+Resultados de farmacias (uno por línea, ya normalizados):
+${pricesText || "(sin datos de precios, solo listado de farmacias)"}
 
-Con esta información, responde en un párrafo corto explicando qué farmacia(s) le podrían convenir más al usuario para este medicamento, SIN poner precios inventados, SIN URLs y sin listas. 
-Si no tienes ningún precio disponible, acláralo y sugiérele revisar los botones de la app para ver detalle en cada cadena.
-`.trim()
-      : `
-Mensaje del usuario: "${message}"
-
-No hay datos de precios en este momento. 
-Responde solo con información general, explicando que no pudiste obtener los valores de las farmacias y que puede revisar los sitios o botones de la app para comparar. 
-No incluyas URLs ni listas.
+Da una recomendación corta sobre qué farmacia podría convenir más, respetando las reglas.
 `.trim();
 
     const completion = await openai.chat.completions.create({
@@ -573,20 +567,11 @@ No incluyas URLs ni listas.
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.4,
       max_tokens: 220,
+      temperature: 0.4,
     });
 
-    const answer = completion.choices?.[0]?.message?.content?.trim() || "";
-
-    if (!answer) {
-      console.error("OpenAI devolvió respuesta vacía");
-      return res.json({
-        ok: true,
-        answer:
-          "No pude obtener la recomendación del asistente en este momento. Por favor revisa los precios y la distancia de cada farmacia en la lista.",
-      });
-    }
+    const answer = completion.choices?.[0]?.message?.content || "";
 
     res.json({
       ok: true,
