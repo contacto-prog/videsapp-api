@@ -1,4 +1,4 @@
-// server.js – VIDESAPP API (precios + asistente MiPharmAPP)
+// server.js // server.js – VIDESAPP API (precios + asistente MiPharmAPP)
 
 import express from "express";
 import cors from "cors";
@@ -519,27 +519,72 @@ app.post("/api/chat", async (req, res) => {
     }
 
     let pricesText = "";
-    if (pricesContext && Array.isArray(pricesContext.items)) {
-      const lines = pricesContext.items.map((it) => {
+    let allWithoutPrice = false;
+
+    if (
+      pricesContext &&
+      Array.isArray(pricesContext.items) &&
+      pricesContext.items.length > 0
+    ) {
+      const items = pricesContext.items;
+
+      // ¿Todos sin precio?
+      allWithoutPrice = items.every((it) => it.price == null);
+
+      const lines = items.map((it) => {
+        const chain = it.chainName || "Farmacia";
         const priceStr =
           it.price != null ? `$${it.price}` : "precio no disponible";
-        return `- ${it.chainName}: ${priceStr} (url: ${it.buyUrl})`;
+        const distStr =
+          it.distanceKm != null ? `aprox. a ${it.distanceKm} km` : "";
+        const webStr = it.buyUrl ? `web: ${it.buyUrl}` : "";
+        const mapsStr = it.mapsUrl ? `cómo llegar: ${it.mapsUrl}` : "";
+
+        return [
+          `- ${chain}`,
+          priceStr,
+          distStr,
+          webStr,
+          mapsStr,
+        ]
+          .filter(Boolean)
+          .join(" | ");
       });
+
       pricesText = lines.join("\n");
     }
 
     const systemPrompt = `
-Eres el asistente de MiPharmAPP.
+Eres el asistente de MiPharmAPP, una app de comparación de farmacias en Chile.
 
 - Ayudas a los usuarios a entender los resultados de farmacias y medicamentos.
-- NO inventes precios. Si no hay precio en los datos, di que deben revisarlo en la web de la farmacia.
-- No des indicaciones médicas personalizadas; siempre recomienda consultar a un profesional de la salud.
-- Si el usuario pregunta qué farmacia le conviene, usa SOLO la lista que te pasamos como contexto.
+- NO inventes precios ni descuentos. Si no hay precio en los datos, di explícitamente que el precio no está disponible.
+- Puedes usar los nombres de farmacias, distancias, enlaces web (buyUrl) y enlaces de "cómo llegar" (mapsUrl) que se te pasan como contexto.
+- Nunca inventes farmacias nuevas ni URLs nuevas: usa solo las que aparecen en el contexto.
+- No des indicaciones médicas personalizadas ni ajustes de dosis; siempre recomienda consultar a un profesional de la salud.
+- Si el usuario pregunta qué farmacia le conviene, explica comparando SOLO las opciones del contexto.
+- Si no hay precios pero sí farmacias con webs, explica que no se encontró el precio y ofrece algo del estilo:
+  "No pude obtener el precio de este medicamento, pero estas farmacias están cerca de ti; aquí están sus páginas web para que revises el valor actualizado".
 `.trim();
 
-    const userPrompt = pricesText
-      ? `Mensaje del usuario: "${message}".\n\nResultados de farmacias:\n${pricesText}\n\nResponde de forma clara en español.`
-      : `Mensaje del usuario: "${message}". No hay datos de precios en este momento. Responde solo con información general en español.`;
+    let userPrompt;
+
+    if (pricesText) {
+      userPrompt = `
+Mensaje del usuario: "${message}".
+
+Contexto de resultados de farmacias (cada línea incluye nombre de cadena, precio si existe, distancia, web y cómo llegar):
+${pricesText}
+
+Responde de forma clara en español. Si ves que la mayoría no tiene precio, prioriza explicar que no se encontró el precio y sugiere revisar las webs indicadas.
+`.trim();
+    } else {
+      userPrompt = `
+Mensaje del usuario: "${message}".
+
+No hay datos de precios ni de farmacias en este momento. Responde solo con información general en español y sugiere al usuario consultar directamente en farmacias o con un profesional de la salud.
+`.trim();
+    }
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
@@ -547,9 +592,10 @@ Eres el asistente de MiPharmAPP.
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
+      temperature: 0.3,
     });
 
-    const answer = completion.choices?.[0]?.message?.content || "";
+    const answer = completion.choices?.[0]?.message?.content?.trim() || "";
 
     res.json({
       ok: true,
