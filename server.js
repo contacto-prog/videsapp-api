@@ -1,5 +1,4 @@
 // server.js
-import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
@@ -33,8 +32,7 @@ function buildAssistantPrompt(body) {
     .map((it) => ({
       chainName: it.chainName || "Farmacia",
       price: typeof it.price === "number" ? it.price : null,
-      distanceKm:
-        typeof it.distanceKm === "number" ? it.distanceKm : null,
+      distanceKm: typeof it.distanceKm === "number" ? it.distanceKm : null,
       buyUrl: it.buyUrl || null,
     }))
     .filter((it) => !!it.chainName);
@@ -95,20 +93,18 @@ app.get("/api/health", (_req, res) => {
 });
 
 /**
- * Tu endpoint de precios (DEJA el tuyo si ya tienes lógica propia).
- * Esto es solo un ejemplo mínimo; ajusta o ignora esta parte si ya está funcionando.
+ * Endpoint de precios (ejemplo mínimo).
+ * Si ya tienes tu lógica real, deja esa y solo conserva el /api/chat.
  */
 app.get("/api/prices", async (req, res) => {
   const { lat, lng, radius, product } = req.query;
   console.log("[PRICE GET]", { lat, lng, radius, product });
 
   try {
-    // Aquí va tu lógica real de precios.
-    // Ejemplo de respuesta mínima compatible con la app:
     const dummyItems = [
       {
         chainName: "Dr. Simi",
-        price: null, // cuando tengas APIs reales, pon el número
+        price: null,
         distanceKm: 3.1,
         buyUrl: "https://drsimi.cl",
       },
