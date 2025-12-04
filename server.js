@@ -80,7 +80,6 @@ TU TAREA:
 4. No repitas los links; la app ya tiene botones "Ver en la web" y "Ir".
 5. Siempre agrega una frase de seguridad tipo:
    "Los precios pueden variar y es importante verificar en la farmacia antes de comprar."
-6. Da una pequeña reseña de para que sirve el medicamento, en español de Chile.
 
 Responde SOLO con el texto que se muestra en la tarjeta azul, sin formato Markdown.
   `;
