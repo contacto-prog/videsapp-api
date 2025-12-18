@@ -14,6 +14,19 @@ app.use(cors());
 app.use(express.json());
 
 /**
+ * Healthchecks (Render suele usar /health)
+ * - Mantengo /api/health para la app
+ * - Agrego /health para Render / infra
+ */
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true, status: "MiPharmAPP API running" });
+});
+
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({ ok: true, status: "MiPharmAPP API running" });
+});
+
+/**
  * Utilidad para construir el prompt del asistente (PRECIOS)
  */
 function buildAssistantPrompt(body) {
@@ -36,15 +49,6 @@ function buildAssistantPrompt(body) {
       buyUrl: it.buyUrl || null,
     }))
     .filter((it) => !!it.chainName);
-
-  const hasAnyPrice = chains.some((c) => c.price !== null);
-  let cheapest = null;
-
-  if (hasAnyPrice) {
-    cheapest = chains
-      .filter((c) => c.price !== null)
-      .sort((a, b) => a.price - b.price)[0];
-  }
 
   let contextText = "";
   if (chains.length === 0) {
@@ -72,31 +76,20 @@ TU TAREA:
    - Di claramente qué farmacia conviene más y por qué (más barata, más cerca, equilibrio precio/distancia).
    - Puedes mencionar 2–3 alternativas como máximo.
    - Responde en tono simple y cercano, en español de Chile.
-2. Si NO hay precios en el contexto, asume que la app no pudo leer los precios reales.
-   - NO inventes precios exactos para esas farmacias específicas.
-   - Puedes dar rangos aproximados solo si te sientes razonablemente confiado, pero deja clarísimo que es referencial.
-   - Recomienda cuál farmacia puede ser más conveniente según distancia o disponibilidad.
-3. La respuesta DEBE ser breve (máximo 4–5 líneas) y sin viñetas ni listas largas.
-4. No repitas links; la app ya tiene botones "Ver en la web" y "Ir".
+2. Si NO hay precios en el contexto:
+   - NO inventes precios exactos.
+   - Recomienda según distancia/disponibilidad.
+3. La respuesta DEBE ser breve (máximo 4–5 líneas).
+4. No repitas links; la app ya tiene botones.
 5. Siempre agrega:
    "Los precios pueden variar y es importante verificar en la farmacia antes de comprar."
 
-Responde SOLO con el texto que se muestra en la tarjeta azul, sin formato Markdown.
+Responde SOLO con el texto, sin Markdown.
   `;
 }
 
 /**
- * Healthcheck simple
- */
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, status: "MiPharmAPP API running" });
-});
-
-/**
- * NUEVO: Endpoint de ficha informativa del medicamento (para "Buscar medicamento")
- * - No diagnostica
- * - No da dosis
- * - No indica tratamientos
+ * NUEVO: ficha informativa (Buscar medicamento)
  */
 app.post("/api/medication-info", async (req, res) => {
   try {
@@ -170,8 +163,7 @@ Reglas:
 });
 
 /**
- * Endpoint de precios (ejemplo mínimo).
- * Si ya tienes tu lógica real, deja esa y solo conserva /api/chat y /api/medication-info.
+ * Endpoint de precios (tu lógica real puede reemplazar esto)
  */
 app.get("/api/prices", async (req, res) => {
   const { lat, lng, radius, product } = req.query;
@@ -201,7 +193,7 @@ app.get("/api/prices", async (req, res) => {
 });
 
 /**
- * Endpoint del asistente de precios
+ * Asistente de precios
  */
 app.post("/api/chat", async (req, res) => {
   try {
