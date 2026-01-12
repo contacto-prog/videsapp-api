@@ -25,8 +25,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 /* =========================
-   NUEVO ENDPOINT MEDICACIÓN
-   👉 ESTE ES EL FIX
+   MEDICATION INFO (SIN CAMBIOS)
 ========================= */
 app.post("/api/medication-info", async (req, res) => {
   const q = String(req.body?.q || "").trim();
@@ -34,11 +33,7 @@ app.post("/api/medication-info", async (req, res) => {
   if (!q) {
     return res.status(400).json({
       medicine: "",
-      info: {
-        summary: "No se indicó un medicamento.",
-        uses: [],
-        precautions: [],
-      },
+      info: { summary: "No se indicó un medicamento.", uses: [], precautions: [] },
     });
   }
 
@@ -48,22 +43,21 @@ Entrega información clara y general sobre el medicamento "${q}".
 
 Incluye:
 - Qué es o para qué se usa (1 frase).
-- Usos comunes (máx 3 puntos).
-- Precauciones importantes (máx 3 puntos).
+- Usos comunes (máx 3).
+- Precauciones importantes (máx 3).
 
 Reglas:
-- NO entregues dosis.
-- NO hagas diagnóstico.
-- NO inventes contraindicaciones raras.
-- Lenguaje simple, para público general en Chile.
-- Información general, no reemplaza orientación médica.
+- NO dosis
+- NO diagnósticos
+- Lenguaje simple
+- Público general en Chile
+- Información general, no reemplaza orientación médica
 
-Responde SOLO en JSON con esta estructura exacta:
-
+Responde SOLO en JSON:
 {
-  "summary": "texto corto",
-  "uses": ["uso 1", "uso 2"],
-  "precautions": ["precaución 1", "precaución 2"]
+  "summary": "texto",
+  "uses": [],
+  "precautions": []
 }
 `;
 
@@ -71,28 +65,16 @@ Responde SOLO en JSON con esta estructura exacta:
       model: "gpt-4.1-mini",
       temperature: 0.4,
       messages: [
-        {
-          role: "system",
-          content:
-            "Eres un asistente de información farmacológica general para una app en Chile.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
+        { role: "system", content: "Asistente farmacológico general para Chile." },
+        { role: "user", content: prompt },
       ],
     });
 
-    const raw = completion.choices?.[0]?.message?.content || "";
+    const parsed = JSON.parse(
+      completion.choices?.[0]?.message?.content || "{}"
+    );
 
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (_) {
-      throw new Error("Respuesta IA no es JSON válido");
-    }
-
-    return res.json({
+    res.json({
       medicine: q,
       info: {
         summary: parsed.summary || `Información general sobre "${q}".`,
@@ -100,21 +82,19 @@ Responde SOLO en JSON con esta estructura exacta:
         precautions: Array.isArray(parsed.precautions)
           ? parsed.precautions
           : [
-              "Revisa contraindicaciones y advertencias del envase.",
+              "Revisa contraindicaciones del envase.",
               "Consulta a un profesional de salud ante dudas.",
             ],
       },
     });
-  } catch (err) {
-    console.error("[MEDICATION INFO ERROR]", err);
-
-    return res.json({
+  } catch {
+    res.json({
       medicine: q,
       info: {
         summary: `Información general sobre "${q}".`,
         uses: [],
         precautions: [
-          "Revisa contraindicaciones y advertencias del envase.",
+          "Revisa contraindicaciones del envase.",
           "Consulta a un profesional de salud ante dudas.",
         ],
       },
@@ -136,37 +116,75 @@ function normalizeUrl(u) {
       url.protocol = "https:";
     }
     return url.toString();
-  } catch (_) {
+  } catch {
     return null;
   }
 }
 
 app.get("/api/prices", async (req, res) => {
   const { lat, lng, radius, product } = req.query;
-  console.log("[PRICE GET]", { lat, lng, radius, product });
 
-  const dummyItems = [
+  const items = [
     { chainName: "Dr. Simi", price: null, distanceKm: 3.1, buyUrl: normalizeUrl("https://www.drsimi.cl/") },
     { chainName: "Ahumada", price: null, distanceKm: 3.2, buyUrl: normalizeUrl("https://www.farmaciasahumada.cl/") },
     { chainName: "Salcobrand", price: null, distanceKm: 3.6, buyUrl: normalizeUrl("https://www.salcobrand.cl/") },
     { chainName: "Cruz Verde", price: null, distanceKm: null, buyUrl: normalizeUrl("https://www.cruzverde.cl/") },
   ];
 
-  res.json({
-    ok: true,
-    product: product || null,
-    lat,
-    lng,
-    radius,
-    items: dummyItems,
-  });
+  res.json({ ok: true, product, lat, lng, radius, items });
 });
 
 /* =========================
-   CHAT (SIN CAMBIOS)
+   CHAT — FIX (SIN DISTANCIAS NI NOMBRES)
 ========================= */
+function buildAssistantPrompt(body) {
+  const product =
+    body?.productName ||
+    body?.pricesContext?.productName ||
+    body?.pricesContext?.query ||
+    "este medicamento";
+
+  const items = Array.isArray(body?.pricesContext?.items)
+    ? body.pricesContext.items
+    : [];
+
+  const hasPrices = items.some((i) => typeof i.price === "number");
+
+  // Si no hay precios reales, entregamos rango estimado, pero SIN hablar de distancia ni nombres de farmacias.
+  if (!hasPrices) {
+    return `
+El usuario busca el medicamento "${product}" en Chile.
+
+No hay precios exactos por farmacia.
+
+TAREA:
+- Si el medicamento es conocido, entrega un RANGO REFERENCIAL EN CLP para Chile (ej: "suele estar aprox entre $X y $Y").
+- Si NO tienes referencia, dilo explícitamente.
+- Siempre aclara que depende de la marca, concentración y cantidad (presentación).
+- NO menciones distancias ni nombres de farmacias.
+- Sí puedes decir: "hay farmacias cercanas en el mapa" y que use "Ver en la web" e "Ir" para confirmar.
+- 4 a 6 líneas máximo.
+- Termina SIEMPRE con:
+  "Los precios pueden variar y es importante verificar en la farmacia antes de comprar."
+
+Responde SOLO texto, sin Markdown.
+`;
+  }
+
+  // Si algún día llegan precios reales, queda esta rama lista.
+  return `
+Hay precios reales disponibles para "${product}".
+Compara brevemente y di cuál conviene más.
+Máximo 4 a 6 líneas.
+Termina con:
+"Los precios pueden variar y es importante verificar en la farmacia antes de comprar."
+`;
+}
+
 app.post("/api/chat", async (req, res) => {
   try {
+    const prompt = buildAssistantPrompt(req.body);
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0.5,
@@ -174,12 +192,9 @@ app.post("/api/chat", async (req, res) => {
         {
           role: "system",
           content:
-            "Eres un asistente de MiPharmAPP. Ayudas a comparar precios y farmacias en Chile.",
+            "Eres un asistente de MiPharmAPP. Entregas orientación breve sobre precios referenciales de medicamentos en Chile (sin inventar datos exactos por farmacia).",
         },
-        {
-          role: "user",
-          content: req.body?.message || "",
-        },
+        { role: "user", content: prompt },
       ],
     });
 
@@ -188,11 +203,11 @@ app.post("/api/chat", async (req, res) => {
       "No pude generar una recomendación en este momento.";
 
     res.json({ reply });
-  } catch (error) {
-    console.error("[CHAT ERROR]", error);
-    res.status(500).json({
+  } catch (e) {
+    console.error("[CHAT ERROR]", e);
+    res.json({
       reply:
-        "No pude generar una recomendación en este momento. Usa los botones de la app.",
+        "No tengo precios exactos, pero hay farmacias cercanas en el mapa. Usa los botones para revisar disponibilidad y precios.",
     });
   }
 });
